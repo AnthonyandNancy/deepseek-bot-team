@@ -1,0 +1,14 @@
+{
+  "name": "workgroup-ai-hub",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Workgroup AI Hub: the server-side service for this repository (Hub HTTP/WSS, accounts, devices).",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}

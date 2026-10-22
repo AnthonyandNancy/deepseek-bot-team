@@ -1,0 +1,66 @@
+// The Workgroup domain: an independent copy of the original group-chat subsystem,
+// installed once, into the single DS Bot runtime.
+//
+// Rules this file enforces (they are the G0 audit's P0 findings, see
+// docs/g0/reference-classification.md):
+//   * installed exactly once — a second install throws instead of registering a
+//     second set of tools/listeners;
+//   * never runs the original MODULES again — it only *references* the one runtime;
+//   * its own maps (roomWaiters / roomProgress / roomInbox / sessionOwners) instead
+//     of the original rt.roomWaiters and friends, so a local group and a workgroup
+//     can never touch each other's turns;
+//   * its own state file, its own RPC route, its own source kind, its own tool names.
+import * as state from './host/state.js'
+import * as ownership from './host/ownership.js'
+import * as tasks from './host/tasks.js'
+import * as groups from './host/groups.js'
+import * as hub from './host/hub.js'
+import * as channel from './host/channel.js'
+
+// Order matters the same way it does in ../../index.js: state and ownership before
+// anything that resolves a Session, tasks and groups before the route that exposes them.
+// tasks installs before groups because it claims task Sessions through ownership and
+// chains onto the same `onStateLoaded` hook groups never touches.
+// `hub` installs after groups and before channel: the channel answers the `hub-*` endpoints and
+// needs `wg.hub` to exist, while nothing in groups depends on the Hub.
+const WG_MODULES = [state, ownership, tasks, groups, hub, channel]
+
+export function installWorkgroup(rt) {
+  if (rt === undefined || rt === null) throw new Error('ds-bot: installWorkgroup needs the runtime')
+  if (rt.workgroup !== undefined) {
+    // One runtime, one Workgroup. Duplicated installs are the exact failure the plan
+    // forbids: two sets of tools with the same names and two event consumers.
+    throw new Error('ds-bot: the Workgroup domain is already installed in this runtime')
+  }
+
+  const wg = {
+    rt,                   // the one real runtime; never a copy of it
+    ctx: rt.ctx,
+    state: null,          // filled by host/state.js
+    sessionOwners: new Map(),
+    roomWaiters: new Map(),
+    roomProgress: new Map(),
+    roomInbox: new Map(),
+    tasks: new Map(),
+    bridge: null,         // filled in G3+
+    installedAt: Date.now(),
+  }
+  rt.workgroup = wg
+
+  // A failure here must not take the original Bot team down with it. The plan's
+  // §7.1 requires the local team to keep working when a network-bound feature cannot;
+  // the same applies to this domain's own wiring. The failure is reported loudly and
+  // `rt.workgroup` is cleared, so callers see "not installed" rather than a half-built
+  // domain, and the reason is visible in the diagnostics log.
+  try {
+    for (const module of WG_MODULES) module.install(wg)
+  } catch (error) {
+    delete rt.workgroup
+    rt.warn?.('ds-bot: the Workgroup domain did not install; the local team keeps working: %s', error?.message ?? error)
+    wg.installError = error
+    return undefined
+  }
+  return wg
+}
+
+export { WG_MODULES }

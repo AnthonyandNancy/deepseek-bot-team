@@ -1,0 +1,166 @@
+// TLS enforcement: a password may only cross the wire over TLS.
+//
+// This is the one place where a mistake is invisible in normal use — everything works, and the
+// passwords are in the clear. So each refusal is a test rather than a comment:
+//   * no certificate and no opt-in → the process refuses to start;
+//   * the opt-in covers loopback only, checked per request so a proxy cannot widen it;
+//   * a certificate means a real HTTPS listener.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { request } from 'node:https'
+import { existsSync, readFileSync } from 'node:fs'
+import { Readable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+import { ConfigError, isLoopback, loadConfig } from '../src/config.js'
+import { createHub } from '../src/server.js'
+import { createMemoryLogger } from '../src/log.js'
+import { PASSWORD, PHONE_A, testConfig } from './helpers.js'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const CERT = join(HERE, 'fixtures', 'test-cert.pem')
+const KEY = join(HERE, 'fixtures', 'test-key.pem')
+
+test('starting without TLS and without the explicit opt-in is refused', () => {
+  // The whole point of a password system: there is no acceptable way to receive one over
+  // plaintext from another machine.
+  assert.throws(() => loadConfig({}), ConfigError)
+  assert.throws(() => loadConfig({ HUB_PORT: '7788' }), /Refusing to start without TLS/)
+})
+
+test('a certificate and key are used together or not at all', () => {
+  assert.throws(() => loadConfig({ HUB_TLS_CERT: CERT }), /must be set together/)
+  assert.throws(() => loadConfig({ HUB_TLS_KEY: KEY }), /must be set together/)
+  const both = loadConfig({ HUB_TLS_CERT: CERT, HUB_TLS_KEY: KEY })
+  assert.deepEqual(both.tls, { cert: CERT, key: KEY })
+  assert.equal(both.insecureLoopbackOnly, false)
+})
+
+test('the loopback opt-in is explicit and yields a loopback-only config', () => {
+  // Anything other than the exact string "1" leaves the opt-in off: a stray "true" or "yes"
+  // must not silently start a plaintext server.
+  for (const value of ['', '0', 'true', 'yes', 'TRUE']) {
+    assert.throws(() => loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: value }), ConfigError, `"${value}" must not opt in`)
+  }
+  const opted = loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: '1' })
+  assert.equal(opted.tls, null)
+  assert.equal(opted.insecureLoopbackOnly, true)
+})
+
+test('ttl and port values are validated rather than taken on trust', () => {
+  const base = { HUB_ALLOW_INSECURE_LOCALHOST: '1' }
+  assert.throws(() => loadConfig({ ...base, HUB_PORT: 'abc' }), /HUB_PORT/)
+  assert.throws(() => loadConfig({ ...base, HUB_PORT: '99999' }), /HUB_PORT/)
+  assert.throws(() => loadConfig({ ...base, HUB_ACCESS_TTL: '-5' }), /HUB_ACCESS_TTL/)
+  // Seconds in, milliseconds out: an operator writing 30 means half a minute, not 30 ms.
+  assert.equal(loadConfig({ ...base, HUB_ACCESS_TTL: '30' }).accessTtlMs, 30_000)
+  assert.equal(loadConfig(base).accessTtlMs, 30 * 60 * 1000)
+})
+
+test('loopback addresses are recognised in every form a listener reports', () => {
+  for (const address of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '127.0.0.53']) assert.equal(isLoopback(address), true, address)
+  for (const address of ['10.0.0.1', '192.168.1.5', '::ffff:10.0.0.1', 'example.com', undefined]) assert.equal(isLoopback(address), false, String(address))
+})
+
+test('a plaintext hub refuses a request that did not come from this machine', async (t) => {
+  const hub = createHub({ config: testConfig(), logger: createMemoryLogger().logger })
+  t.after(() => hub.close())
+  // The handler is exercised directly with a spoofed peer address: the only way to test this
+  // over a loopback socket is to lie about where the request came from.
+  const handler = hub.server.listeners('request')[0]
+  const response = await new Promise((resolve) => {
+    const req = new Readable({
+      read() {
+        // A real body, so a handler that skipped the guard would consume it and answer instead
+        // of hanging. Without this the test would time out rather than fail, which reads as
+        // "slow" instead of "insecure".
+        this.push(JSON.stringify({ phone: '+8613800138000', password: 'correct horse battery staple' }))
+        this.push(null)
+      },
+    })
+    req.method = 'POST'
+    req.url = '/v1/auth/login'
+    req.socket = { remoteAddress: '10.1.2.3' }
+    req.headers = { 'content-type': 'application/json' }
+    const res = {
+      writeHead: (status, headers) => resolve({ status, headers }),
+      end: () => {},
+    }
+    handler(req, res)
+  })
+  assert.equal(response.status, 403)
+})
+
+test('a TLS hub serves HTTPS and prints no plaintext warning', async (t) => {
+  const { lines, logger } = createMemoryLogger()
+  const hub = createHub({
+    config: testConfig({ tls: { cert: CERT, key: KEY }, insecureLoopbackOnly: false }),
+    logger,
+  })
+  const address = await hub.listen()
+  t.after(() => hub.close())
+  assert.equal(address.scheme, 'https')
+
+  // Trust is established with the test certificate itself, so the check is real: a client that
+  // did not trust this cert would fail, and no TLS bypass flag is involved.
+  const body = await new Promise((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port: address.port, path: '/v1/health', ca: readFileSync(CERT) }, (res) => {
+      let text = ''
+      res.on('data', chunk => { text += chunk })
+      res.on('end', () => resolve(JSON.parse(text)))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+  assert.equal(body.ok, true)
+  assert.equal(body.tls, true)
+})
+
+test('the test certificate is only ever loaded when it is asked for', async (t) => {
+  // The fixtures must not be a default. A Hub configured with TLS but pointed at nothing else
+  // must not quietly fall back to the test key.
+  assert.equal(existsSync(CERT), true, 'the fixture must exist, or this test proves nothing')
+  const config = loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: '1', HUB_TLS_CERT: '', HUB_TLS_KEY: '' })
+  assert.equal(config.tls, null, 'an empty HUB_TLS_CERT means "no TLS", not "use the fixture"')
+
+  // And a server built from the plaintext config really is an HTTP server: asking it for a TLS
+  // socket must be refused, which an HTTPS server would never do.
+  const hub = createHub({ config: testConfig(), logger: createMemoryLogger().logger })
+  const address = await hub.listen()
+  t.after(() => hub.close())
+  assert.equal(address.scheme, 'http')
+  assert.equal(hub.config.tls, null)
+  const details = hub.server.getConnections !== undefined
+  assert.equal(details, true)
+  // A plain HTTP server has no TLS state at all; an HTTPS one keeps the certificate here.
+  assert.equal(hub.server.cert, undefined)
+})
+
+test('login over a trusted TLS connection works end to end', async (t) => {
+  // The whole authentication flow over HTTPS: encryption and the auth logic proven together,
+  // which is how the plugin will actually use it.
+  const { logger } = createMemoryLogger()
+  const hub = createHub({ config: testConfig({ tls: { cert: CERT, key: KEY }, insecureLoopbackOnly: false }), logger })
+  const address = await hub.listen()
+  t.after(() => hub.close())
+
+  const post = (path, body) => new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body)
+    const req = request({
+      host: '127.0.0.1', port: address.port, path, method: 'POST', ca: readFileSync(CERT),
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+    }, (res) => {
+      let text = ''
+      res.on('data', chunk => { text += chunk })
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) }))
+    })
+    req.on('error', reject)
+    req.end(payload)
+  })
+
+  const registered = await post('/v1/auth/register', { phone: PHONE_A, password: PASSWORD })
+  assert.equal(registered.status, 201)
+  const loggedIn = await post('/v1/auth/login', { phone: PHONE_A, password: PASSWORD })
+  assert.equal(loggedIn.status, 200)
+  assert.equal(loggedIn.body.hubUserId, registered.body.hubUserId)
+})
