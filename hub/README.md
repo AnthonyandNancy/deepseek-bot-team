@@ -34,15 +34,20 @@ Or, for a throwaway loopback instance with no certificate at all:
 HUB_ALLOW_INSECURE_LOCALHOST=1 npm start
 ```
 
+Neither of those is reachable from another machine: the first binds `127.0.0.1`, and the second
+is checked per request against the peer address. To answer on this host's LAN address
+(`http://10.1.8.49:7788`, say) see [Serving the LAN](#serving-the-lan).
+
 ## Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HUB_HOST` | `127.0.0.1` | Bind address. Forced to loopback when running without TLS. |
+| `HUB_HOST` | `127.0.0.1` | Bind address. Without TLS it must be loopback unless `HUB_ALLOW_PLAINTEXT_LAN=1`; the Hub refuses to start rather than rewriting the address. |
 | `HUB_PORT` | `7788` | Listen port. |
 | `HUB_TLS_CERT` | — | Path to the certificate. Must be set together with `HUB_TLS_KEY`. |
 | `HUB_TLS_KEY` | — | Path to the private key. |
-| `HUB_ALLOW_INSECURE_LOCALHOST` | — | Set to exactly `1` to allow plaintext **on loopback only**. |
+| `HUB_ALLOW_INSECURE_LOCALHOST` | — | Set to exactly `1` to allow plaintext at all. On its own this still means **loopback only**. |
+| `HUB_ALLOW_PLAINTEXT_LAN` | — | Set to exactly `1` to let a plaintext bind reach beyond loopback. Also removes the per-request check that refuses non-loopback peers. |
 | `HUB_DATA_DIR` | `hub/.data` | Directory holding `hub.db`. |
 | `HUB_ACCESS_TTL` | `1800` | Access token lifetime, in seconds. |
 | `HUB_REFRESH_TTL` | `2592000` | Refresh token lifetime, in seconds (30 days). |
@@ -54,10 +59,80 @@ is spent; a password that is intercepted is a permanent credential, and people r
 the Hub refuses to start without a certificate unless you explicitly opt in to plaintext, and
 even then it refuses every request whose peer is not this machine — checked per request, not
 only at startup, because a listener can end up reachable through a proxy or a container bridge
-after it starts.
+after it starts. Widening that to the local network is a separate, named decision:
+`HUB_ALLOW_PLAINTEXT_LAN=1`, described under [Serving the LAN](#serving-the-lan).
 
 The opt-in is the exact string `1`. `true`, `yes`, and `TRUE` all leave it off: a typo must not
 silently start a plaintext server.
+
+### Serving the LAN
+
+A Hub started with `HUB_ALLOW_INSECURE_LOCALHOST=1` alone listens on `127.0.0.1`, so
+`http://10.1.8.49:7788` (this host's own address) does not answer even from this host. Three
+separate gates have to be understood, because fixing one does not move the other two:
+
+| Gate | Where | What clears it |
+|---|---|---|
+| Plaintext is refused outright | `src/config.js`, `loadConfig` | `HUB_ALLOW_INSECURE_LOCALHOST=1` **or** a certificate |
+| A plaintext bind outside loopback is refused | `src/config.js`, `loadConfig` | `HUB_ALLOW_PLAINTEXT_LAN=1` **or** a certificate |
+| Every request from a non-loopback peer is refused with `403 hub/plaintext-refused` | `src/http.js`, `createHttpHandler` | `HUB_ALLOW_PLAINTEXT_LAN=1` or a certificate (either one leaves `insecureLoopbackOnly` false) |
+
+So the plaintext route is all three variables, and the two `1`s are not interchangeable:
+`HUB_ALLOW_INSECURE_LOCALHOST` says "plaintext is acceptable", `HUB_ALLOW_PLAINTEXT_LAN` says
+"…and the network may reach it". Only the second one is a decision about other people's
+passwords, which is why they are separate.
+
+```bash
+cd hub
+HUB_ALLOW_INSECURE_LOCALHOST=1 HUB_ALLOW_PLAINTEXT_LAN=1 HUB_HOST=0.0.0.0 npm start
+```
+
+Windows `cmd.exe`, one variable per line (`set X=1`), or PowerShell (`$env:X = '1'`); the
+variables are read once at startup, so they must be set in the same shell that runs `npm start`.
+`0.0.0.0` is every interface, so `http://127.0.0.1:7788` and `http://10.1.8.49:7788` both work;
+naming the address itself (`HUB_HOST=10.1.8.49`) listens only there and breaks the loopback URL
+the plugin may already have saved.
+
+```bash
+curl -s http://10.1.8.49:7788/v1/health
+# → {"ok":true,"tls":false,"service":"workgroup-ai-hub"}
+```
+
+A successful start logs two lines, and the second one exists so this state is never entered by
+accident:
+
+```
+{"event":"hub.listening","scheme":"http","host":"0.0.0.0","port":7788,"tls":false,"dataDir":"…"}
+{"event":"hub.plaintext-on-network","host":"0.0.0.0","detail":"passwords cross the network in the clear; HUB_ALLOW_PLAINTEXT_LAN is set"}
+```
+
+Three things go wrong after that, in this order of likelihood:
+
+1. **Nothing is listening on the old instance.** Restart it — the flags are startup-only. Keep
+   `HUB_DATA_DIR` unchanged, or the Hub opens a different (empty) database and every account
+   looks missing; `hub.ready` prints `dataDir`, which is the comparison to make.
+2. **The OS firewall drops the connection** while loopback still works. Allow the port once:
+   `netsh advfirewall firewall add rule name="workgroup-ai-hub" dir=in action=allow protocol=TCP localport=7788`.
+3. **Only loopback answers.** The bind is still `127.0.0.1`: `HUB_ALLOW_PLAINTEXT_LAN` is missing,
+   or it is set to something other than `1`, or the shell was not the one that started the Hub.
+
+The same reachability without plaintext is a certificate plus the bind address — two variables
+instead of three, and no password on the wire. The SAN must cover the address the clients will
+type:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -keyout key.pem -out cert.pem -subj "/CN=10.1.8.49" \
+  -addext "subjectAltName=IP:10.1.8.49"
+
+HUB_HOST=0.0.0.0 HUB_TLS_CERT=./cert.pem HUB_TLS_KEY=./key.pem npm start
+# → https://10.1.8.49:7788, not http
+```
+
+With TLS the bind address is the operator's business and neither plaintext flag is needed. It is
+the option to prefer: the plaintext path puts every login password on the wire, and the whole
+"why TLS is mandatory" argument above is about exactly that. The flags exist for a lab network
+that has been accepted as such, not as a convenience setting.
 
 ## Endpoints
 
