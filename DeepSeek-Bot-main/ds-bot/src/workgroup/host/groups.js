@@ -29,7 +29,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { mentionSpans, speakerOf } from '../../shared/mentions.js'
 import { escapeRegExp, headOf, splitRef, textOf } from '../../host/text.js'
 import { SOURCE_KIND, TEAM_TOOLS } from '../../host/constants.js'
-import { WG_ADMIN_EXTRA_TURNS, WG_ADMIN_TURNS_EACH, WG_DELTA_MAX, WG_DIR, WG_EXTRA_TURNS, WG_FIRST_LOOK, WG_LATE_ROUNDS, WG_LINE_READ, WG_LOG_MAX, WG_READ_MAX, WG_REPLY_TIMEOUT_MS, WG_ROOM_MAX_MEMBERS, WG_ROOM_MIN_MEMBERS, WG_ROOM_MODES, WG_SOURCE_KIND, WG_STEP_GAP_MS, WG_TEXT_KEPT, WG_TOOLS, WG_TURNS_EACH, WG_WORK_GRACE_MS } from '../shared/constants.js'
+import { WG_ADOPT_INTERVAL_MS, WG_ADMIN_EXTRA_TURNS, WG_ADMIN_TURNS_EACH, WG_DELTA_MAX, WG_DIR, WG_EXTRA_TURNS, WG_FIRST_LOOK, WG_LATE_ROUNDS, WG_LINE_READ, WG_LOG_MAX, WG_READ_MAX, WG_REPLY_TIMEOUT_MS, WG_ROOM_MAX_MEMBERS, WG_ROOM_MIN_MEMBERS, WG_ROOM_MODES, WG_SOURCE_KIND, WG_STEP_GAP_MS, WG_TEXT_KEPT, WG_TOOLS, WG_TURNS_EACH, WG_WORK_GRACE_MS } from '../shared/constants.js'
 
 // The original's group passes [PASS] to stay silent; the same rule applies here so a
 // copied round behaves identically.
@@ -429,10 +429,23 @@ export function install(wg) {
       const name = member.memberType === 'botEndpoint'
         ? (member.name ?? member.endpointName ?? member.endpointId)
         : (member.phoneMasked ?? member.name ?? 'A member')
+      // THE HUB ANSWERS WITH ENDPOINT IDS, AND SOME OF THEM ARE THIS MACHINE'S OWN BOTS.
+      //
+      // A member whose `kind` is not `localBot` is handed to the Hub instead of to a local Session
+      // (`sessionFor`), which is right for somebody else's Bot and catastrophic for one's own: the
+      // round posted "answer this" up to the Hub and waited for a device that was never going to
+      // answer, so a workgroup had no greeting and no reply. `endpointBots` is what this machine
+      // published (`publishBotEndpoints`), and it is the only place that mapping exists.
+      const localBotId = member.memberType === 'botEndpoint'
+        ? wg.bridge?.endpointBots?.()?.[member.endpointId] ?? wg.state?.endpointBots?.[member.endpointId]
+        : undefined
+      const local = localBotId !== undefined && rt.botOf(localBotId) !== undefined
       return {
         id: member.memberType === 'botEndpoint' ? member.endpointId : member.userId,
-        kind: member.memberType === 'botEndpoint' ? 'remoteBot' : 'user',
+        // A Bot of this team answers here; anything else is reached through the Hub.
+        kind: local ? 'localBot' : member.memberType === 'botEndpoint' ? 'remoteBot' : 'user',
         name,
+        ...(local ? { botId: localBotId } : {}),
         // Which Hub user this member is, so an incoming event's `sender.userId` can be matched to a
         // name without a second lookup.
         hubUserId: member.userId ?? undefined,
@@ -442,13 +455,23 @@ export function install(wg) {
       }
     }).filter(member => member.id !== undefined && member.id !== null)
 
+    // The admin must be somebody who can actually answer HERE. The Hub's owner is a person
+    // (`usr_…`), and a person is not a member this machine can run a turn for: made admin, they
+    // were the only member `mode: 'admin'` ever called, so every round had nobody to call. The
+    // first local Bot leads instead, which is what the original's admin always was.
     const owner = roster.find(member => member.role === 'owner')
-    const adminId = owner === undefined
-      ? (room.adminId ?? null)
+    const ownerId = owner === undefined
+      ? undefined
       : (owner.memberType === 'botEndpoint' ? owner.endpointId : owner.userId)
+    const answerable = next.filter(member => member.kind === 'localBot')
+    const adminId = answerable.some(member => member.id === ownerId)
+      ? ownerId
+      : answerable[0]?.id ?? ownerId ?? (room.adminId ?? null)
 
     const same = (room.members ?? []).length === next.length
-      && (room.members ?? []).every((member, index) => member.id === next[index]?.id && member.name === next[index]?.name)
+      && (room.members ?? []).every((member, index) => member.id === next[index]?.id
+        && member.name === next[index]?.name
+        && member.kind === next[index]?.kind)
       && room.adminId === adminId
     // Written only when it changed: every event would otherwise touch state.json, and a group with
     // traffic would rewrite the file on each message.
@@ -456,6 +479,20 @@ export function install(wg) {
     room.members = next
     room.adminId = adminId
     await wg.save()
+    // THE GROUP OPENS ITSELF AS SOON AS IT HAS SOMEBODY TO SPEAK.
+    //
+    // `createWorkgroup` greets immediately, which is right for a group made with members already in
+    // it. A group made on the Hub is not: `ensureLinkedGroup` creates the room with NO members,
+    // because the Hub owns the roster, so `adminId` is null and the greet returns early. Nothing
+    // greeted it afterwards either — the roster arrived later and no one asked again — so a
+    // workgroup created while signed in opened as a blank page, with no greeting and no
+    // introduction, while the identical local group opened properly.
+    //
+    // This is the first moment a Hub group can speak at all, so it is where the greeting belongs.
+    // `greeted` makes it happen exactly once, even though the roster is re-applied on every change.
+    if (room.greeted !== true && (room.adminId ?? null) !== null) {
+      void greetWorkgroup(room.id).catch(error => rt.warn('ds-bot: workgroup "%s" could not open its chat: %s', room.name, error?.message ?? error))
+    }
     return room
   }
   wg.applyRoster = applyRoster
@@ -469,6 +506,50 @@ export function install(wg) {
     return applyRoster({ hubWorkgroupId, members: answer.members })
   }
   wg.syncRoster = syncRoster
+
+  // Every Hub group this account is in becomes a local room, so a group can be FOUND and not only
+  // received.
+  //
+  // Why this exists: a machine only ever learned about a group it had not created when an event for
+  // it arrived (`bridge.js` `ensureRoom`) or when it accepted an invitation in this process. Both
+  // are one-shot. A colleague who accepted an invitation, then restarted, restarted into a list that
+  // no longer mentioned the group — the Hub row was still there, but nothing on this machine turned
+  // it into something the sidebar could draw, so there was nothing to click and no messages to read.
+  //
+  // Idempotent by construction: `ensureLinkedGroup` returns the existing room for a known Hub group,
+  // so this only ever adds what is missing. A Hub that is down answers `undefined`/throws, and the
+  // whole step is skipped rather than failing the state read — the group list must still render.
+  async function adoptHubGroups() {
+    // Throttled: `state` is polled (the panel's connection line asks every 5 seconds), and each
+    // miss would otherwise be a Hub round trip. A minute is far below the time it takes a person to
+    // notice a group is missing, and it keeps a poll from becoming Hub traffic.
+    const now = Date.now()
+    if (now - (wg.lastAdoptAt ?? 0) < WG_ADOPT_INTERVAL_MS) return 0
+    wg.lastAdoptAt = now
+    const groups = await wg.hub?.workgroups?.().catch(() => undefined)
+    if (!Array.isArray(groups) || groups.length === 0) return 0
+    let added = 0
+    for (const group of groups) {
+      const workgroupId = group?.workgroupId
+      if (typeof workgroupId !== 'string' || workgroupId === '') continue
+      if (roomOfHubGroup(workgroupId) !== undefined) continue
+      const room = await ensureLinkedGroup({
+        hubWorkgroupId: workgroupId,
+        name: group.name,
+        notice: group.notice ?? '',
+      }).catch(() => undefined)
+      if (room === undefined) continue
+      added += 1
+      // A freshly adopted room has no members and no log — `ensureLinkedGroup` deliberately starts
+      // it empty, because the Hub owns both. Filling them here is what makes the adopted group as
+      // usable as one this machine created: without the roster the member list is empty, and
+      // without the pull the group opens blank even though the Hub has the conversation.
+      await wg.syncRoster?.({ hubWorkgroupId: workgroupId }).catch(() => {})
+      await wg.bridge?.sync?.(workgroupId).catch(() => {})
+    }
+    return added
+  }
+  wg.adoptHubGroups = adoptHubGroups
 
   // Rename, notice, admin and membership changes. The original does this in
   // roster.js's planRoomChange/updateRoom; here it is one small function because a
@@ -924,6 +1005,12 @@ export function install(wg) {
   async function greetWorkgroup(roomId) {
     const room = wg.workgroupOf(roomId)
     if (room === undefined || (room.adminId ?? null) === null) return
+    // A group is greeted ONCE. The Hub's roster arrives after the room is made, so the first
+    // greetable moment is not the create — see `greetOnce` and its caller in `applyRoster`. The
+    // marker is persisted so a restart does not greet the same group again.
+    if (room.greeted === true) return
+    room.greeted = true
+    await wg.save().catch(() => {})
     const agent = await rt.resolveAgent(room.id)
     if (agent === undefined) return
     const message = createUserMessage({
@@ -1258,13 +1345,22 @@ export function install(wg) {
   // in admin mode, or first of everyone.
   function openingSpeakers(room, opener) {
     const everyone = room.members ?? []
-    const members = everyone.filter(member => member.id !== opener.botId)
+    // A person is IN the group but never ANSWERS it. This machine cannot run a turn for somebody
+    // else's account, so a `usr_…` member handed to the round becomes a `deliverRemote` post —
+    // "you were called" — sent up to the Hub, where nobody is listening.
+    //
+    // The original never had this shape: every member of a local group was a Bot, so `everyone`
+    // was answerable by construction. This is the one thing the copy must ADD rather than inherit.
+    // @mentions are still parsed against the full list, so naming a person is consumed as a
+    // mention rather than leaking into the text — it simply cannot make them a speaker.
+    const answerable = everyone.filter(member => member.kind !== 'user')
+    const members = answerable.filter(member => member.id !== opener.botId)
     const admin = members.find(member => member.id === room.adminId)
     if (opener.kickoff) return admin ? [admin] : []
     if (opener.quiet) return []
     if (opener.done) return members.filter(member => member.id === opener.askedBy)
     const { all, found: named } = mentionsIn(opener.text ?? '', everyone)
-    const found = named.filter(member => member.id !== opener.botId)
+    const found = named.filter(member => member.kind !== 'user' && member.id !== opener.botId)
     if (opener.progress) return found
     if (opener.late) return found.length > 0 ? found : members.filter(member => member.id === opener.askedBy)
     if (found.length > 0 && !all) return found

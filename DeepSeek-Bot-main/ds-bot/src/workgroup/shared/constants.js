@@ -77,3 +77,7 @@ export const WG_ADMIN_EXTRA_TURNS = 4
 // How often one member may be called again inside a round.
 export const WG_TURNS_EACH = 2
 export const WG_ADMIN_TURNS_EACH = 4
+// How often the group list asks the Hub which groups this account is in. `state` is polled, so this
+// keeps a poll from becoming Hub traffic while staying far below the time a missing group would go
+// unnoticed.
+export const WG_ADOPT_INTERVAL_MS = 60_000

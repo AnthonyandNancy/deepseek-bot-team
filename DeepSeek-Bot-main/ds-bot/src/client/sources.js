@@ -43,8 +43,15 @@ export function indexRoster(value, workgroups) {
   //
   // Written after the bots so a local Bot wins a collision. A workgroup member id is a Hub id
   // (`ep_…`/`usr_…`) and cannot collide today, but the precedence should not rest on that.
+  //
+  // A member that IS one of this team's Bots resolves to that BOT, not to the thin member record.
+  // The record carried just `{id, kind, name}`, so `lookOf()` derived a character from the Hub's
+  // `ep_…` id and every member of a workgroup wore a shape and colour of its own — visibly not the
+  // Bot's own character, which is what the sidebar and every other surface draw for the same Bot.
+  // `botId` is what `applyRoster` records for a member it recognised as this machine's own Bot.
   for (const member of workgroupMembers(workgroups)) {
-    if (byId[member.id] === undefined) byId[member.id] = member
+    const own = member.botId === undefined ? undefined : byId[member.botId]
+    if (byId[member.id] === undefined) byId[member.id] = own ?? member
   }
   // The DSH Agent is not a Bot: it indexes by its own id and by each Session it owns.
   const agentsById = {}

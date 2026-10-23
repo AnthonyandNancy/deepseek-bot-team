@@ -12,10 +12,28 @@ import { springEasing, SPRING_SHAPE } from './motion.js'
 import { hostText, t } from './i18n.js'
 import { WorkgroupRow } from '../workgroup/client/rows.js'
 import { refreshWorkgroups } from '../workgroup/client/panel.js'
+import { InviteInbox, InviteInboxButton, useInbox } from '../workgroup/client/inbox.js'
 import { showsDshRow } from './dsh-offer.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
+
+// The invitation inbox lives in the Workgroup domain, but its button belongs in this header row.
+// Mounting it here (rather than in the panel that domain registers) is the whole point: the panel
+// was reachable from nowhere, so an invitation had no way to appear. A person looks for "who needs
+// me" beside Search, and that is where it now is.
+function InviteInboxSlot() {
+  const [open, setOpen] = useState(false)
+  const { incoming } = useInbox()
+  return h(Fragment, null,
+    h(InviteInboxButton, { count: incoming.length, onClick: () => setOpen(value => !value) }),
+    h(InviteInbox, {
+      open,
+      onClose: () => setOpen(false),
+      // Accepting adds a group: the sidebar list and the workgroup store both have to learn it.
+      onChanged: () => { void refreshWorkgroups() },
+    }))
+}
 
 // Manual "Mark as Unread" lasts until the conversation is opened again.
 function useMarkedUnread(id, active, marked, actions) {
@@ -312,11 +330,16 @@ export function TeamSidebar(props) {
     wide ? h('div', { className: 'bt-side-top' },
       h('span', { className: 'bt-brand' }, h(BrandMark, { size: 22 }), h(BrandName)),
       h(UpdateButton, { useUpdate: props.useUpdate, actions }),
+      // The invitation inbox sits beside Search, where a person looks for "who needs me". An
+      // invitation is a Hub row, so the list, the answers and their styles live in the Workgroup
+      // domain (bounded to a row count); the sidebar only mounts it.
+      h(InviteInboxSlot),
       h('button', { type: 'button', className: 'bt-round', 'aria-label': t('Search'), title: t('Search'), onClick: () => actions.openPalette() }, h(SearchIcon)),
       h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon)),
       h('button', { type: 'button', className: 'bt-round bt-side-collapse', 'aria-label': t('Collapse sidebar'), title: t('Collapse sidebar'), onClick: () => actions.toggleSidebar() }, h(SidebarIcon)))
       : h(Fragment, null,
           h(UpdateButton, { useUpdate: props.useUpdate, actions }),
+          h(InviteInboxSlot),
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
     wide && roster.readOnly ? h('div', { className: 'bt-hint bt-read-only', role: 'status' }, hostText(roster.readOnly)) : null,
     h('div', { ref: listRef, className: 'bt-list', role: 'region', 'aria-label': t('Bot list') },

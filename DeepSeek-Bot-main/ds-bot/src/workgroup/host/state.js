@@ -28,6 +28,18 @@ const emptyState = () => ({
   // taskId -> the request this machine sent and has not seen answered. Local only: the Hub's
   // task row is the record, and this is what the panel polls between a send and its answer.
   taskOutbox: {},
+  // endpointId -> local Bot id, for the Bot endpoints THIS machine published.
+  //
+  // The Hub answers a group's roster with endpoint ids only (`ep_…`), because that is what a
+  // member is on the wire. From that answer alone this machine cannot tell which endpoints are its
+  // OWN Bots, and getting it wrong is not cosmetic: a member whose kind is not `localBot` is handed
+  // to the Hub instead of to a local Session, so this machine's own Bot was asked — over the Hub —
+  // to answer a question it had itself been told to send, and no member ever replied.
+  //
+  // Kept here rather than on the Hub because "which of my Bots is this endpoint" is a fact about
+  // this device, not about the group: the same room resolves differently on every machine, and
+  // that is correct. Rebuilt by `publishBotEndpoints` on every start, so a lost file heals.
+  endpointBots: {},
 })
 
 // Only what this domain understands is kept; an unknown or older shape resets to
@@ -36,7 +48,7 @@ function adopt(raw) {
   if (raw === null || typeof raw !== 'object' || raw.version !== WG_STATE_VERSION) return emptyState()
   const state = emptyState()
   if (Number.isFinite(raw.revision)) state.revision = raw.revision
-  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox']) {
+  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'endpointBots']) {
     const value = raw[key]
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) state[key] = value
   }

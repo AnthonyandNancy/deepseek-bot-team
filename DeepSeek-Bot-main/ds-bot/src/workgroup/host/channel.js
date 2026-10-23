@@ -135,6 +135,10 @@ export function install(wg) {
           // @的时候还存在」). `deleteWorkgroup` archives it from now on; this clears what
           // older builds left, once.
           await wg.adoptOrphans?.()
+          // Groups this account is in on the Hub but that have no local room yet. Without it a
+          // colleague who joined on another machine, and then restarted, opened a list that did
+          // not mention the group at all: there was nothing to click, so nothing to read.
+          await wg.adoptHubGroups?.()
           // COPY OF THE ORIGINAL state answer (src/host/channel.js:73): what changes without
           // a new revision goes with every state answer, so the member capsule and the
           // mascot know who is at work before the next poll of the original route. `work` is

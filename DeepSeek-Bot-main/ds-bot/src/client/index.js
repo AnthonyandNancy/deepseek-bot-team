@@ -33,6 +33,7 @@ import { freePriority, groupsFor, readMode, surfaceGroups, writeMode } from './s
 import { installLocale, language, t } from './i18n.js'
 import { installWorkgroupClient } from '../workgroup/client/index.js'
 import { WORKGROUP_ROW_CSS } from '../workgroup/client/rows.js'
+import { INBOX_CSS } from '../workgroup/client/inbox.js'
 import { callWorkgroup } from '../workgroup/client/api.js'
 import { workgroupStore, refreshWorkgroups, renameWorkgroup, deleteWorkgroup } from '../workgroup/client/panel.js'
 import { noteClientError, quietly } from './diagnostics.js'
@@ -744,7 +745,7 @@ export function apply(ctx) {
     () => installCompiledStyles(SHELL_CSS, 'shell'),
     () => installCompiledStyles(SIDEBAR_CSS, 'sidebar'),
     () => installCompiledStyles(SECRET_CSS, 'secrets'),
-    () => installCompiledStyles(MODEL_CSS + FOLDER_CSS + BOT_SETTINGS_CSS + GROUP_SETTINGS_CSS + WORKGROUP_ROW_CSS, 'models'),
+    () => installCompiledStyles(MODEL_CSS + FOLDER_CSS + BOT_SETTINGS_CSS + GROUP_SETTINGS_CSS + WORKGROUP_ROW_CSS + INBOX_CSS, 'models'),
     () => installCompiledStyles(USAGE_CSS, 'usage'),
     () => installCompiledStyles(SCHEDULE_CSS, 'schedules'),
     () => installCompiledStyles(FEEDBACK_CSS, 'feedback'),

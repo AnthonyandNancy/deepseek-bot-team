@@ -213,3 +213,140 @@
 - 变异验证：撤掉修复 → `every member id a workgroup hands out resolves through byId` **失败**；恢复 → 5/5 通过。证明这条测试真的能抓住这个 bug，不是摆设
 - 验证：`ds-bot` **1044 tests / 1043 pass / 1 skip / 0 fail**；lint **0 error / 13 warnings**；`--check` exit 0；`src/host/` 零改动
 - 顺带修：`app/node_modules/ds-bot` 的 junction 又被 `npm install` 冲成真实副本且已过期；用**绝对路径**重建（相对路径会被 `mklink` 按当前目录解析，第一次重建指错到 `D:\code\ai\DeepSeek-Bot\ds-bot`），已确认 `client.js` 与源构建逐字节相同且含本次修复
+
+---
+
+## 2026-10-23 · G4 回归 · 本机 Bot 在工作群里不回答（初始化与回复）
+
+用户：「建工作群 → 原版群聊那样的初始化逻辑 → 有问候 → 你说话 → 有回复」；「工作群是复制原版群聊
+所有代码为基础的新建的工作群聊……因地制宜的修改但是不能脱离」。
+
+### 迁移完整性核对结果
+
+机制**全部已迁移**，逐项核对过：`greetWorkgroup`（`groups.js:354` 由 `createWorkgroup` 调用）、
+`session/event` 的 `user/message` 入队（`groups.js:1953`）、`llm/stream` 的 relay（`groups.js:2109`）、
+`sessionFor`、`runRound`、`openingSpeakers`。**缺的不是机制，是成员的 `kind`。**
+
+### 真因
+
+`sessionFor`（`groups.js:727`）：`if (member.kind !== 'localBot') return undefined` —— 非本地成员
+交给 `deliverRemote` 发上 Hub。而真实创建路径写进来的成员是：
+
+| 步骤 | 结果 |
+|---|---|
+| 本机 Bot → `publishBotEndpoints()` | Hub 分配 `ep_…` |
+| `createWorkgroup({ endpointIds })` | Hub 建群 |
+| Hub 返回成员表（只有 `endpointId`） | `applyRoster` 写入 |
+| `applyRoster` 写的 `kind` | **`remoteBot` / `user`** |
+
+于是 `sessionFor` 对**每一个**成员都返回 `undefined`，round 把所有人交给 `deliverRemote` → `bridge.send()`。
+**本机自己的 Chief 被当成另一台设备的 Bot，消息发上 Hub 等一个永不存在的回答。** 群既没有问候也没有回复。
+
+决定性验证（实测）：
+
+```
+路人甲A      -> NO LOCAL SESSION (handed to Hub)
+Chief        -> NO LOCAL SESSION (handed to Hub)
++86****2222  -> NO LOCAL SESSION (handed to Hub)
+```
+
+第二个真因：`applyRoster` 把 Hub 的 owner（**人**，`usr_…`）直接写成 `adminId`。`mode: 'admin'` 只叫 admin
+一个人，于是每轮唯一候选是个本机无法运行 turn 的人。原版的 admin 必然是 Bot。
+
+`kind: 'localBot'` 在生产代码里**从未被写入过**——只有 `twoMembers()` 测试帮手手搓它。13 个 round 测试全绿，
+产品是死的。这是「边界测了、主干没测」的第三次复现。
+
+### 修复（选 A：本地映射表）
+
+`endpointId → localBotId` 是**设备本地**事实，同一房间在每台机器上解析结果不同，存 Hub 反而是错的方向；
+且只要插件要兼容已部署的 Hub，B 方案最终仍需 A。B 以后可作 fallback：`applyRoster` 已支持
+`member.localBotId` 直接读取，无需改结构。
+
+| 文件 | 改动 |
+|---|---|
+| `src/workgroup/host/state.js` | 新增 `endpointBots`（`endpointId → localBotId`），纳入 `adopt` |
+| `src/workgroup/host/bridge.js` | `publishBotEndpoints` 记录映射并保存；新增 `endpointBots()` 读取 |
+| `src/workgroup/host/groups.js` | `applyRoster` 查映射：命中且本机有该 Bot → `kind: 'localBot'` + `botId`；admin 必须是**能回答**的成员（人不行，退到第一个本地 Bot）；`same` 比较加入 `kind`，kind 变化会落盘 |
+
+### 测试（3 条，走真实产品路径）
+
+`test/workgroup-g4-api.test.js`，用真 Hub + 真 `create-room` + 真成员：
+
+1. `a workgroup built from this machine's Bots has members that can answer HERE`
+   —— 两个本机 Bot 都必须是 `localBot` 且 `botId` 指回 `a`/`b`；admin 必须是其中之一
+2. `the person who created the group is a member, but never the one called to answer`
+   —— owner 是人，可以入群，但**永不当 admin**；且不新增/丢成员
+3. `what the user types in a workgroup is answered by this machine's own Bot`
+   —— 端到端：`send` → 入队 → relay → **本机 Bot 的 Session** → 回复进日志，`who: 'Chief'` 且归属该成员
+
+**变异验证**（每条都真能抓 bug）：
+- 撤掉 kind 解析 → 测试 1 失败
+- 只撤掉 admin 规则 → 测试 1、2、3 全部失败
+- 恢复 → 17/17 通过
+
+### 验证
+
+`ds-bot` **1047 tests / 1046 pass / 1 skip / 0 fail**；lint **0 error / 13 warnings**；`--check` exit 0；
+`src/host/` 零改动（五个原版文件逐字节不变）。`app/node_modules/ds-bot` junction 再次被 `npm install`
+冲成目录，已用绝对路径重建为 `<JUNCTION>`。
+
+### 未做（下一轮）
+
+- `usr_…`（本人）仍可能被 `openingSpeakers` 选中并交给 `deliverRemote`；admin 规则已使其不再是默认候选，
+  但 `@all` / everyone 模式下的这一路径需要单独钉住。
+- 用户第 2 项（邀请同事后能查看群消息）属于 **G4** 范围（`g4/NEXT-INSTRUCTION.md:42,46,48`、T08），
+  不在 G5；本轮未改动该路径。
+
+---
+
+## 2026-10-23 · G4 补齐 · 邀请收件箱入口 + 头像身份 + 建群问候
+
+用户三点：①建群后没有原版那样的初始化与介绍；②每个 Bot 的头像不是自己的，是随机的；
+③「在图中的搜索图标隔壁新增收信箱，用于接受邀请的 CURD」，按 G4 做。
+
+### ① 建群后没有问候
+
+真因是**建群顺序**：`ensureLinkedGroup` 建本地房间时刻意不带成员（成员归 Hub 所有），于是
+`adminId` 为 `null`，`greetWorkgroup` 在 `if ((room.adminId ?? null) === null) return` 直接返回。
+成员表随后同步进来，但**再没有任何地方叫过一次问候**。所以登录状态下建的工作群打开是白纸，
+而同名本地群正常（本地群建时成员已在，`adminId` 有值）。
+
+修法：把问候挪到**成员表第一次就绪**的时刻（`applyRoster`），那才是 Hub 群第一次真的有人能说话。
+加 `room.greeted` 标记并持久化，保证只问候一次——否则每次有成员变更都会重新问「这个群是干什么的」。
+
+### ② 头像随机
+
+真因是成员记录太薄：Hub 回来的成员是 `{id, kind, name}`，而 `lookOf()` 从 **id** 推导形状与颜色。
+成员 id 是 Hub 的 `ep_…`，于是每个成员都按端点 id 生成形象——看起来像随机的，永远不是侧栏那个 Bot。
+
+修法：适配层解析到**本机 Bot 记录本身**（`applyRoster` 已记录 `botId`）：
+
+```js
+const own = member.botId === undefined ? undefined : byId[member.botId]
+if (byId[member.id] === undefined) byId[member.id] = own ?? member
+```
+
+远端成员的 Bot 没有本地记录，保持成员记录不变。
+
+### ③ 邀请收件箱（G4）
+
+**归属**：G4，不是 G5。依据 `g4/NEXT-INSTRUCTION.md` §2（「群成员/邀请」列进 G4）与 §3 端点清单
+（含 `POST /v1/invites/:id/accept`），验收 T08「双机聊天、附件、成员邀请」。G5 是跨用户任务委派与
+审批（同意卡片），与「入群同意」不是同一件事。
+
+**真实缺口**：收件箱组件早就存在（`panel.js` 的 `InviteInbox`），但它挂在 `WG_PANEL_KEY` 那个面板里，
+而**全仓没有任何导航指向该面板**。邀请能到 Hub、能到本机，却没有任何地方显示。
+
+新增 `src/workgroup/client/inbox.js`（`useInbox` / `InviteInboxButton` / `InviteInbox` / `INBOX_CSS`），
+并在 `src/client/sidebar.js` 的头部按钮行、**搜索图标左侧**挂 `InviteInboxSlot`（折叠态也保留）。
+接受后调 `refreshWorkgroups()`，新群立刻出现在列表。
+
+### 验证
+
+- `ds-bot` **1059 tests / 1058 pass / 1 skip / 0 fail**；`hub` **257 pass / 0 fail**
+- lint **0 error / 13 warnings**；`--check` exit 0；`src/host/` 零改动
+- 新增测试：`workgroup-inbox-entry.test.js` 4 条（入口位置、CURD 能力、接受后刷新、角标与样式）、
+  `workgroup-g4-api.test.js` 加 2 条端到端（邀请进收件箱→加入→群出现在列表；拒绝→收件箱清空且不入群）、
+  `workgroup-roster-shape.test.js` 加 2 条（本机 Bot 解析到自己的记录、远端成员保持原样）
+- 变异验证：撤掉问候触发 → 问候测试失败；撤掉 `botId` 解析 → 头像测试失败
+- `app/node_modules/ds-bot` junction 再次被 `npm install` 冲成目录，已用绝对路径重建，`client.js` 与源构建一致

@@ -209,9 +209,16 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
         })
         .catch(error => logger?.warn?.('ds-bot: workgroup event %s not shown: %s', event.eventId, error?.message ?? error))
       // Remembered so a caller that awaits `apply` sees the line in the log; the socket path does
-      // not await, but a test and the attachment path do.
+      // not await, but a pull and the attachment path do.
       pending.set(event.eventId, shown)
       void shown.finally(() => pending.delete(event.eventId))
+      // A PULL must not return before the line is on disk. `sync` advances the cursor here, so
+      // resolving early let a caller read the room and find it empty even though the Hub's events
+      // had all been consumed — which is exactly what a restart onto an adopted group looked like:
+      // the cursor said "up to date", the conversation was blank, and the next sync fetched
+      // nothing because the cursor had already moved. The socket path does not await this: it fires
+      // and forgets, which is right for a live event.
+      await shown
     }
     // A task-related event also reaches the task runner: the approval card a request becomes, and
     // the grant a decision produces. It is NOT a chat line, so it never becomes one.
@@ -743,9 +750,16 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     // ── bot endpoints ─────────────────────────────────────────────────────────────
     // Publishing is idempotent on the Hub (per owner + device + local Bot), so calling this on
     // every start is the correct way to refresh a capability list.
+    //
+    // Each answer also says which endpoint stands for which local Bot, and that mapping is the only
+    // place this machine can learn it: a group's roster comes back as endpoint ids, so without it
+    // this machine's own Bot reads as somebody else's on another device — and the round hands it to
+    // the Hub instead of answering locally, which is why a workgroup's chat had no replies. It is
+    // recorded here, at the one moment both halves are in hand.
     async publishBotEndpoints() {
       const bots = wg.rt.state?.bots ?? {}
       const published = []
+      let learned = false
       for (const bot of Object.values(bots)) {
         if (bot?.id === undefined) continue
         try {
@@ -756,13 +770,31 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
             // tool, a folder or a capability the plugin cannot honour.
             capabilities: ['chat', 'files'],
           })
+          const endpointId = result?.endpoint?.endpointId
+          if (endpointId !== undefined) {
+            wg.state ??= {}
+            wg.state.endpointBots ??= {}
+            if (wg.state.endpointBots[endpointId] !== String(bot.id)) {
+              wg.state.endpointBots[endpointId] = String(bot.id)
+              learned = true
+            }
+          }
           published.push(result.endpoint)
         } catch (error) {
           // One Bot failing to publish must not stop the others, and must not stop a chat.
           logger?.warn?.('ds-bot: Bot %s not published to the Hub: %s', bot.id, error?.message ?? error)
         }
       }
+      // An endpoint revoked elsewhere keeps its entry until a publish stops producing it. That is
+      // harmless: `applyRoster` looks the map up BY the roster's own endpoint ids, so an entry for
+      // an endpoint no group mentions is never consulted.
+      if (learned) await wg.save?.().catch?.(() => {})
       return published
+    },
+
+    // endpointId -> local Bot id, for the endpoints this machine published.
+    endpointBots() {
+      return wg.state?.endpointBots ?? {}
     },
 
     // ── a remote member's turn ───────────────────────────────────────────────────
