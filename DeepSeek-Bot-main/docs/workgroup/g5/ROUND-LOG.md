@@ -350,3 +350,79 @@ if (byId[member.id] === undefined) byId[member.id] = own ?? member
   `workgroup-roster-shape.test.js` 加 2 条（本机 Bot 解析到自己的记录、远端成员保持原样）
 - 变异验证：撤掉问候触发 → 问候测试失败；撤掉 `botId` 解析 → 头像测试失败
 - `app/node_modules/ds-bot` junction 再次被 `npm install` 冲成目录，已用绝对路径重建，`client.js` 与源构建一致
+
+---
+
+## 2026-02-14 — 群主/管理员归属 + 权限档位（用户截图两条）
+
+**用户报告**：①「新建的工作群，群主应该是我，管理员是管家 bot，目前不知道为什么变成群主是其他 BOT，
+管理员没了」②「新建的工作群，权限不知道选中哪个」
+
+三处根因都在 `applyRoster` / `createWorkgroup` 这两个适配边界上，不是功能缺失。
+
+### ① 管理员给了「列表里第一个」而不是主 Bot
+
+`applyRoster` 用 `answerable[0]?.id` 选管理员。Hub 的成员按
+`memberships ORDER BY joined_at` 返回，所以**先入群的普通 Bot** 拿走了管理员角色，
+主 Bot（管家）反而没有。原版 `src/host/roster.js:332` 的 `defaultAdmin` 是：
+
+```js
+const defaultAdmin = (members, createdBy) =>
+  (members.includes(createdBy) ? createdBy : members.find(rt.isMain) ?? null)
+```
+
+即**成员里的主 Bot** 领导群。这正是用户说的「群主是我，管理员是管家 bot」：
+用户是群主（Hub 的 `role === 'owner'`，roster 显示为「群主」），主 Bot 是管理员。
+
+改为原版顺序：owner 发布的 Bot → 主 Bot → 第一个可应答成员 → 保留原管理员。
+owner 的 Bot 按 `endpointId` 匹配（**不是** `id`，见下条）。
+
+### ② 管理员标签消失：成员 id 的语义错了
+
+原版群的成员是 **Bot id**（`src/host/roster.js` `createRoom`），所有原版组件都通过
+`roster.byId[id]` 找成员：管理员标签是 `room.admin === member.id`，设置行 `openBot(member.id)`，
+头像画那条记录。
+
+工作群把成员 id 写成了 Hub 的 `ep_…`。上一轮的头像修复让 `byId[ep_…]` 返回**Bot 记录本身**，
+而那条记录的 `id` 是 Bot id —— 于是 `room.admin === member.id` 变成 `ep_…` vs Bot id，
+**永远不成立**，所有管理员标签一起消失。群其实有管理员，只是没有一个组件画得出来。
+
+修法：本机 Bot 成员直接用**自己的 Bot id**，和原版群完全一致：
+
+```js
+id: local ? localBotId : member.memberType === 'botEndpoint' ? member.endpointId : member.userId,
+```
+
+Hub 的端点 id 仍然保留在 `member.endpointId` 上（寻址端点需要它）。远端成员不受影响。
+
+**连带迁移**：`room.sessions[member.id]` 和 `room.seen[member.id]` 都以成员 id 为键。id 变了之后，
+旧键会留下一个「有人拥有、却没人指向」的 Session（`registerSessionOwner` 还列着，回收不了），
+而成员下一轮会开第二个、丢掉已读位置。`applyRoster` 里按 `endpointId`（跨两种形状唯一稳定的字段）
+把两个映射搬到新键上。
+
+### ③ 权限「不知道选中哪个」：写入了 `null` 而这个字段该缺席
+
+`createWorkgroup` 写入 `permission: null`。原版只在用户打开「全员统一」时才写这个键，
+且**两个读者都测 `!== undefined`**：
+
+- `GroupPermission` 算 `shared = room.permission !== undefined` → `null` 让开关画成**开**
+- `PermissionPicker` 收到 `saved: null` → **三个档位一个都不高亮**
+
+所以屏幕上是「开关开着，但没有任何一档被选中」。`setRoomPermission` 清除时是
+`delete room.permission`（`src/host/permissions.js:64`），`null` 是原版这个字段从不持有的值。
+
+改为**不写这个键**。另在 `state.js` 的 `adopt()` 里把旧文件里的 `permission: null` 丢掉，
+使已经建好的群在加载时自愈，不必让用户把开关关了再开。
+
+### 验证
+
+- `ds-bot` **1063 tests / 1062 pass / 1 skip / 0 fail**；`hub` **257 pass / 0 fail**
+- lint **0 error / 13 warnings**；`build-client.mjs --check` exit 0；`src/host/` 零改动
+- `workgroup-g4-api.test.js` 由 23 增至 27：主 Bot 领导且群主仍是「我」、成员按 Bot id 键控、
+  新群不谎称设置了共享权限、成员 id 变更后 Session/已读游标跟随、旧文件 `permission: null` 自愈
+- 变异验证（逐个撤掉修复，确认对应测试各自失败）：
+  - `answerable[0]` 还原 → 「Main Bot leads」「has members that can answer HERE」2 条失败
+  - 成员 id 还原为 `ep_…` → 同上 2 条失败
+  - 恢复 `permission: null` → 「does not claim a shared permission」失败
+  - 撤掉 Session 键迁移 → 「keeps its group Session」失败
+  - 撤掉 `adopt()` 自愈 → 「stored permission: null」失败

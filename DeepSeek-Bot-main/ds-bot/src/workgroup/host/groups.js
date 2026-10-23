@@ -342,7 +342,13 @@ export function install(wg) {
       // COPY OF THE ORIGINAL (`state.rooms[*].permission`): one preset for every member
       // here, in place of each member's own. Absent means "each member uses its own",
       // exactly as an absent `permission` on a local group does. `sessionFor` reads it.
-      permission: null,
+      //
+      // ABSENT, not `null`. The original never writes this key until the user turns "Same for
+      // every member" on, and every reader tests `!== undefined`: `GroupPermission` computed
+      // `shared = room.permission !== undefined` — so `null` drew the toggle as ON — while the
+      // picker got `saved: null` and highlighted none of the three presets. That is the reported
+      // 「权限不知道选中哪个」. `setRoomPermission` deletes the key to clear it
+      // (`src/host/permissions.js:64`), so `null` is a value this field never holds.
     }
     wg.state.workgroups[id] = room
     // The group's own Session belongs to this domain: an owned-but-unrecorded Session is
@@ -441,7 +447,16 @@ export function install(wg) {
         : undefined
       const local = localBotId !== undefined && rt.botOf(localBotId) !== undefined
       return {
-        id: member.memberType === 'botEndpoint' ? member.endpointId : member.userId,
+        // A MEMBER THAT IS ONE OF THIS MACHINE'S BOTS IS IDENTIFIED BY THAT BOT'S ID.
+        //
+        // The original's group is built of Bot ids (`src/host/roster.js` `createRoom`), and every
+        // original component reads a member through `roster.byId[id]`: the admin tag is
+        // `room.admin === member.id`, the settings row opens `member.id`, the avatar draws that
+        // record. Keyed by the Hub's `ep_…`, `byId[ep_…]` resolved to a copy of the Bot record whose
+        // OWN `id` was the Bot's, so `room.admin === member.id` was `ep_…` vs a Bot id and every
+        // admin tag vanished while the group still had an admin. `endpointId` below keeps the Hub's
+        // id, which is what addressing that endpoint actually needs.
+        id: local ? localBotId : member.memberType === 'botEndpoint' ? member.endpointId : member.userId,
         // A Bot of this team answers here; anything else is reached through the Hub.
         kind: local ? 'localBot' : member.memberType === 'botEndpoint' ? 'remoteBot' : 'user',
         name,
@@ -455,18 +470,35 @@ export function install(wg) {
       }
     }).filter(member => member.id !== undefined && member.id !== null)
 
-    // The admin must be somebody who can actually answer HERE. The Hub's owner is a person
-    // (`usr_…`), and a person is not a member this machine can run a turn for: made admin, they
-    // were the only member `mode: 'admin'` ever called, so every round had nobody to call. The
-    // first local Bot leads instead, which is what the original's admin always was.
-    const owner = roster.find(member => member.role === 'owner')
-    const ownerId = owner === undefined
-      ? undefined
-      : (owner.memberType === 'botEndpoint' ? owner.endpointId : owner.userId)
+    // WHO LEADS. COPY OF THE ORIGINAL (`defaultAdmin`, src/host/roster.js:332):
+    // `members.includes(createdBy) ? createdBy : members.find(rt.isMain) ?? null`.
+    //
+    // The original's group is led by the **Main Bot** among its members — the Bot the user made
+    // their chief — and that is what the user means by 「群主是我，管理员是管家 Bot」: they own the
+    // group, the Main Bot runs it. `answerable[0]` was neither: it is whichever member the Hub lists
+    // first (`memberships ORDER BY joined_at`), so an ordinary Bot that joined earlier took the
+    // admin role from the Main Bot. Here that looked like "the admin disappeared", because the tag
+    // sat on a Bot the user never chose.
+    //
+    // A Hub *person* is never the admin, and that part is this domain's own: `usr_…` cannot answer
+    // on this machine, so `mode: 'admin'` would call nobody at all — the bug that made every round
+    // silent before the roster was projected. The user is the group's OWNER (`role === 'owner'`,
+    // shown as 群主 by the roster), which the Hub tracks and this rule leaves alone.
     const answerable = next.filter(member => member.kind === 'localBot')
-    const adminId = answerable.some(member => member.id === ownerId)
-      ? ownerId
-      : answerable[0]?.id ?? ownerId ?? (room.adminId ?? null)
+    // The Main Bot, exactly as the original picks it. A member this machine cannot match to a Bot
+    // has no `botId`, so it can never be mistaken for one.
+    const mainBot = answerable.find(member => member.botId !== undefined && rt.isMain?.(member.botId) === true)
+    const owner = roster.find(member => member.role === 'owner')
+    // The owner's own Bot leads when they published one. Matched on `endpointId`, NOT on `id`: a
+    // local member's `id` is now the Bot's own id, so comparing it to the Hub's `ep_…` could never
+    // hold and the owner's Bot never led.
+    const ownerMember = owner === undefined || owner.memberType !== 'botEndpoint'
+      ? undefined
+      : answerable.find(member => member.endpointId === owner.endpointId)
+    // The owner's Bot first, then the Main Bot, then the first answerable member so a group with no
+    // Main Bot still has somebody asked first, then whoever led before rather than dropping to
+    // nobody on a bad sync.
+    const adminId = ownerMember?.id ?? mainBot?.id ?? answerable[0]?.id ?? (room.adminId ?? null)
 
     const same = (room.members ?? []).length === next.length
       && (room.members ?? []).every((member, index) => member.id === next[index]?.id
@@ -476,8 +508,27 @@ export function install(wg) {
     // Written only when it changed: every event would otherwise touch state.json, and a group with
     // traffic would rewrite the file on each message.
     if (same) return room
+    const previous = room.members ?? []
     room.members = next
     room.adminId = adminId
+    // A member's group Session and read cursor are keyed by its MEMBER ID
+    // (`room.sessions[member.id]`, `room.seen[member.id]`), and that id just changed for this
+    // machine's own Bots: the Hub's `ep_…` became the Bot's own id. Without this the machine kept
+    // an owned Session nothing pointed at (`registerSessionOwner` still lists it, so it is not even
+    // reclaimable) and the member started a second one on its next turn, losing what it had read.
+    // Matched on `endpointId`, the one field that is stable across both shapes.
+    const before = new Map()
+    for (const member of previous) if (member?.endpointId !== undefined) before.set(member.endpointId, member.id)
+    for (const member of next) {
+      const was = member.endpointId === undefined ? undefined : before.get(member.endpointId)
+      if (was === undefined || was === member.id) continue
+      for (const key of ['sessions', 'seen']) {
+        const map = room[key]
+        if (map?.[was] === undefined || map[member.id] !== undefined) continue
+        map[member.id] = map[was]
+        delete map[was]
+      }
+    }
     await wg.save()
     // THE GROUP OPENS ITSELF AS SOON AS IT HAS SOMEBODY TO SPEAK.
     //

@@ -48,7 +48,10 @@ export function indexRoster(value, workgroups) {
   // The record carried just `{id, kind, name}`, so `lookOf()` derived a character from the Hub's
   // `ep_…` id and every member of a workgroup wore a shape and colour of its own — visibly not the
   // Bot's own character, which is what the sidebar and every other surface draw for the same Bot.
-  // `botId` is what `applyRoster` records for a member it recognised as this machine's own Bot.
+  //
+  // `applyRoster` now gives such a member the Bot's OWN id, so the bots loop above has already
+  // indexed it and this line changes nothing. The `botId` lookup stays for a room written before
+  // that, whose members still carry the Hub's `ep_…` id.
   for (const member of workgroupMembers(workgroups)) {
     const own = member.botId === undefined ? undefined : byId[member.botId]
     if (byId[member.id] === undefined) byId[member.id] = own ?? member

@@ -52,6 +52,14 @@ function adopt(raw) {
     const value = raw[key]
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) state[key] = value
   }
+  // A group file written by an earlier version carries `permission: null` for every group, which
+  // means "no shared preset" but reads as "shared preset set" to both consumers: the toggle drew as
+  // ON and the picker highlighted no preset. The field is absent for that state in an original group
+  // (`src/host/permissions.js:64` deletes it), so dropping the key on load heals a group made before
+  // this fix instead of making the user toggle it off and on again.
+  for (const room of Object.values(state.workgroups)) {
+    if (room !== null && typeof room === 'object' && room.permission === null) delete room.permission
+  }
   return state
 }
 
