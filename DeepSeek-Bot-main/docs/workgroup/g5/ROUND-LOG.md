@@ -109,3 +109,41 @@
   - `C-9` 未登录建工作群时给出可操作文案
 - 验证：`ds-bot` 1033 tests / 1032 pass / 1 skip；`hub` 256 pass；lint 0 error / 13 warning；`--check` exit 0；`src/host/` 零改动
 - 原版文件改动：`details-drawer.js`（新增 1 处三元，已补进 §5.2 B 类）、`settings.js`（§5.2 已允许）、`new-chat.js`（§5.2 已列）、`i18n.js`（文案）。**`src/client/group-settings.js` 零改动。**
+
+## 2026-10-23 · 邀请同事两项缺陷（用户截图报告）
+
+- 目标：修「邀请行样式不美观」与「已登录 Hub 却报 `The refresh token is not valid.`」
+- 真因（均已用证据坐实，不是猜）：
+  1. **服务端数据丢失，不是 token 逻辑**。运行中的 Hub（`127.0.0.1:7788`，PID 2724，`node src/index.js`，由 `BotCode/hub` 启动）打开的库 `BotCode/hub/hub/.data/hub.db` 里 `users`/`auth_sessions`/`devices`/`audit_events` **全为 0 行**（复制 db+wal 重放验证，`integrity_check: ok`；随后打一次错误密码登录，该库精确多出 1 条 `audit_events`，证明读的就是活动库）。而 `~/.dsh/.credentials.yaml` 自 10-22 14:46 起存着 `usr_b77461…`。根因是 `dataDir` 默认值 `hub/.data` 为**相对路径**：从 `hub/` 启动落到 `hub/hub/.data`，从仓库根启动落到 `hub/.data`，**换目录即换空库**。
+  2. **邀请行样式**：根节点复用了 `bt-wg-invite`（`panel.js` 单行邀请框的类），又套在 `bt-set-row`（横向两栏）里，塞进 5 个子元素；且 `.bt-wg-invite-field/-reason/-note` 全项目无 CSS，`WG_CSS` 只在 `panel.js:534` 挂载面板时才安装，而该行住在**设置抽屉**里。
+- 改动：
+  - `hub/src/config.js`：新增 `DEFAULT_DATA_DIR`；`dataDir: resolve(env.HUB_DATA_DIR ?? DEFAULT_DATA_DIR)`，把相对路径在唯一入口解析一次
+  - `hub/src/cli.js`：改为复用同一个 `resolve`（原先重复了一份相对默认值）
+  - `hub/src/server.js` / `hub/src/index.js`：`hub.listening` 与 `hub.ready` 都打出 `dataDir`，让「换目录」可被一眼发现
+  - `ds-bot/src/workgroup/host/hub.js`：`ensureAccess` 收到 **401** 时 `clearMemory()` + `store.clear()` + 抛 `hub/signed-out`（含说明：401 涵盖无此行/已轮换/已过期/会话已结束，皆永久失效；网络失败等保留记录）
+  - `ds-bot/src/workgroup/host/bridge.js`：新增 `sessionRefused` 状态并在 `status()` 暴露 `refused`；`start()` **不抛**（「无 Hub 的团队必须等同 G3 团队」由既有测试钉住）
+  - `ds-bot/src/workgroup/host/channel.js`：`create-room` 读 `refused` 返回 `hub/signed-out` 而非误报 `hub/unreachable`；`hub-state` 刷新后**重新**读账号，不再用刷新前的快照报 `loggedIn: true`
+  - `ds-bot/src/client/new-chat.js`：`hub/signed-out` 与 `hub/not-signed-in` 同样映射成「先登录再建群」
+  - `ds-bot/src/workgroup/client/invite.js`：改为 `bt-bs-stack` 竖排，类名换为 `bt-wg-invset*`，不再复用面板的单行类
+  - `ds-bot/src/workgroup/client/rows.js`：`.bt-wg-invset*` 布局写进 `WORKGROUP_ROW_CSS`（它随 shell 安装，抽屉里一定存在）
+  - `ds-bot/scripts/build-client.mjs` + `package.json`：新增 `--watch` 与 `npm run dev`（watch 输出与一次性构建**逐字节相同**，已 `cmp` 验证）
+  - `app/node_modules/ds-bot`：改为指向 `../../ds-bot` 的 **junction**，`npm run build` 之后无需重装即可生效（已验证 `add` 后通过 junction 立即看到新产物）
+- 新增测试：`hub/test/tls.test.js`（dataDir 绝对化）；`ds-bot/test/hub-client.test.js`（被拒 token 丢弃且不误报网络；不可达 Hub 不删记录）；`ds-bot/test/workgroup-g4-api.test.js`（**重启后**过期会话报 `hub/signed-out` 且 `hub-state` 转 false）；`ds-bot/test/workgroup-invite.test.js`（竖排类名 + CSS 归属）
+- 验证：`ds-bot` **1037 tests / 1036 pass / 1 skip / 0 fail**；`hub` **257 pass / 0 fail**；lint **0 error / 13 warning**；`--check` exit 0；`git status --porcelain ds-bot/src/host/` **为空**
+- 遗留：错误 1 的账户需**用户重新登录**（服务端记录本就不存在，代码无法代其恢复）；修复后界面会如实显示「会话已结束、请重新登录」
+
+## 2026-10-23 · 退出登录不生效（用户截图报告）
+
+- 现象：点「退出登录」后账号页仍显示已登录（`+86****2222`、`usr_b77461…`、`dev_4b5…`），登录表单不再出现，因此无法重新登录
+- 真因：**不是 UI**。`hub-settings.js` 的 `signOut` 在 `await run(...)` 后确实重新读了 `hub-state`；错在 `hub-store.js` 的 `clear()`：
+  ```js
+  await seam.modifyRecord(CREDENTIAL_KEY, async () => undefined)   // 旧代码
+  ```
+  Harness 的 `modifyRecord` 契约是「`undefined` = **不改动**」，实现里 `if (next === void 0) return current` 直接早返回。**删除只能走 `deleteRecord(key)`**。于是记录一直留在 `~/.dsh/.credentials.yaml` 的 `ds-bot/hub-account`（已核实现场仍在），`restore()` 每次都把它读回来，页面没有别的依据可信。
+- 为什么测试没抓到：`test/hub-store.test.js` 的 `fakeSeam` 把 `undefined` 当成删除，**与真实契约相反**。测试双替身一旦背离真实语义，就只能证明「我的假设自洽」。
+- 改动：
+  - `ds-bot/src/workgroup/host/hub-store.js`：`clear()` 改用 `seam.deleteRecord(CREDENTIAL_KEY)`；无 `deleteRecord` 的旧提供方仍退回 `modifyRecord`（并注明它其实删不掉，只是最接近的降级）
+  - `ds-bot/test/hub-store.test.js`：`fakeSeam` 按真实契约重写——`modifyRecord` 的 `undefined` 视为「不改动」，新增 `deleteRecord`；并加注释说明这次背离曾让 bug 漏网
+  - `ds-bot/test/workgroup-g4-api.test.js`：新增 `signing out really signs out, and signing in again works`——走产品路径断言 `hub-logout` 后 `hub-state.loggedIn === false`、`hubStore.load() === undefined`，且能再次 `hub-login` 成功
+- 验证：`ds-bot` **1038 tests / 1037 pass / 1 skip / 0 fail**；`hub` **257 pass / 0 fail**；lint **0 error / 13 warning**；`--check` exit 0；`src/host/` 零改动
+- 用户侧待办：修复后**再点一次「退出登录」**即可清掉 `~/.dsh/.credentials.yaml` 里残留的那条记录（不手工改用户 DSH 数据）

@@ -29,6 +29,11 @@ const payload = {
 }
 
 // A stand-in for the Harness credential seam: records what was written, in the seam's own shape.
+//
+// The semantics are copied from the real provider on purpose. Getting them wrong is what let a test
+// pass while sign-out was broken in the product: `modifyRecord` returning `undefined` means "leave the
+// record alone", NOT "delete it" — removal is `deleteRecord` and nothing else. A double that treats
+// `undefined` as a delete cannot fail on the bug it exists to catch.
 const fakeSeam = ({ fail } = {}) => {
   let stored
   return {
@@ -42,8 +47,15 @@ const fakeSeam = ({ fail } = {}) => {
     async modifyRecord(key, mutate) {
       assert.equal(key, CREDENTIAL_KEY)
       const next = await mutate(stored)
+      // The real provider's early return, verbatim: a decline is not a write.
+      if (next === undefined) return stored
       stored = next
       return next
+    },
+    async deleteRecord(key) {
+      assert.equal(key, CREDENTIAL_KEY)
+      if (fail === 'delete') throw new Error('seam refuses the delete')
+      stored = undefined
     },
   }
 }

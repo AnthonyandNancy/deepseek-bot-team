@@ -71,11 +71,11 @@ export function WorkgroupInviteRow({ room, onInvited }) {
     }
   }
 
-  return h('div', { className: 'bt-set-row bt-bs-row bt-wg-invite', 'data-invite': canInvite ? 'ready' : 'blocked' },
+  return h('div', { className: 'bt-set-row bt-bs-row bt-bs-stack bt-wg-invset', 'data-invite': canInvite ? 'ready' : 'blocked' },
     h('span', { className: 'bt-set-copy' },
       h('span', { className: 'bt-bs-label' }, t('Invite a colleague')),
       h('span', { className: 'bt-set-hint' }, t('Their phone number, or their Hub user id.'))),
-    h('div', { className: 'bt-wg-invite-field' },
+    h('div', { className: 'bt-wg-invset-field' },
       h('input', {
         className: 'bt-input',
         value,
@@ -95,6 +95,6 @@ export function WorkgroupInviteRow({ room, onInvited }) {
       }, busy ? t('Inviting…') : t('Invite'))),
     // The reason is shown even while the field is disabled, so "why can I not do this" always has an
     // answer on screen next to the control.
-    reason === null ? null : h('span', { className: 'bt-set-hint bt-wg-invite-reason', role: 'status' }, reason),
-    note === null ? null : h('span', { className: 'bt-set-hint bt-wg-invite-note', role: 'status' }, note))
+    reason === null ? null : h('span', { className: 'bt-set-hint bt-wg-invset-reason', role: 'status' }, reason),
+    note === null ? null : h('span', { className: 'bt-set-hint bt-wg-invset-note', role: 'status' }, note))
 }

@@ -13,8 +13,8 @@
 // A reset ends every session and revokes every device: a recovery is exactly the situation where
 // the old holders must lose access.
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
-import { loadConfig } from './config.js'
+import { join, resolve } from 'node:path'
+import { DEFAULT_DATA_DIR, loadConfig } from './config.js'
 import { openDatabase } from './db/index.js'
 import { createAudit } from './audit.js'
 import { createLimiters } from './auth/limiter.js'
@@ -55,7 +55,7 @@ const fail = (message) => {
 // `loadConfig` refuses to start without TLS, which is right for the server and wrong for a local
 // command that opens a file. The data directory is all this tool needs, so it is resolved without
 // going through the transport checks.
-const dataDir = process.env.HUB_DATA_DIR ?? 'hub/.data'
+const dataDir = resolve(process.env.HUB_DATA_DIR ?? DEFAULT_DATA_DIR)
 const file = join(dataDir, 'hub.db')
 if (!existsSync(file)) fail(`no database at ${file}. Start the Hub once, or set HUB_DATA_DIR.`)
 

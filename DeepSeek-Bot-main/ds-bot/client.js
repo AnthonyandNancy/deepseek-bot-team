@@ -6235,6 +6235,15 @@ var WORKGROUP_ROW_CSS = `
 .bt-wg-chip-glyph{font-size:9px;opacity:.75}
 .bt-rail .bt-row-workgroup{position:relative}
 .bt-wg-dot{position:absolute;right:6px;bottom:6px;width:5px;height:5px;border-radius:50%;background:var(--bt-ink-2);box-shadow:0 0 0 1.5px var(--bt-sidebar)}
+/* The invite row. Stacked, because it holds two things a person reads (label, hint) and two they act
+   on (a field, a button); the two-column row it borrowed first gave the field all the room and left
+   the sentence three characters wide. The input keeps a minimum so a long id stays readable, and the
+   hint wraps instead of being clipped. */
+.bt-wg-invset{gap:8px}
+.bt-wg-invset-field{display:flex;align-items:center;gap:8px;width:100%;min-width:0}
+.bt-wg-invset-field>.bt-input{flex:1 1 auto;min-width:0;height:32px}
+.bt-wg-invset-field>.bt-soft{flex:none}
+.bt-wg-invset-reason,.bt-wg-invset-note{overflow-wrap:anywhere}
 `;
 
 // src/workgroup/client/api.js
@@ -11041,7 +11050,7 @@ function NewChat({ mode, roster, actions }) {
         actions.openWorkgroup?.(created2.id);
         close();
       } catch (failure) {
-        if (failure?.code === "hub/not-signed-in") {
+        if (failure?.code === "hub/not-signed-in" || failure?.code === "hub/signed-out") {
           throw Object.assign(new Error(t("A workgroup lives on the Hub. Sign in first, then create it.")), { code: failure.code, needsHub: true });
         }
         throw failure;
@@ -11953,7 +11962,7 @@ function WorkgroupInviteRow({ room: room2, onInvited }) {
   };
   return (0, import_react31.createElement)(
     "div",
-    { className: "bt-set-row bt-bs-row bt-wg-invite", "data-invite": canInvite ? "ready" : "blocked" },
+    { className: "bt-set-row bt-bs-row bt-bs-stack bt-wg-invset", "data-invite": canInvite ? "ready" : "blocked" },
     (0, import_react31.createElement)(
       "span",
       { className: "bt-set-copy" },
@@ -11962,7 +11971,7 @@ function WorkgroupInviteRow({ room: room2, onInvited }) {
     ),
     (0, import_react31.createElement)(
       "div",
-      { className: "bt-wg-invite-field" },
+      { className: "bt-wg-invset-field" },
       (0, import_react31.createElement)("input", {
         className: "bt-input",
         value,
@@ -11985,8 +11994,8 @@ function WorkgroupInviteRow({ room: room2, onInvited }) {
     ),
     // The reason is shown even while the field is disabled, so "why can I not do this" always has an
     // answer on screen next to the control.
-    reason === null ? null : (0, import_react31.createElement)("span", { className: "bt-set-hint bt-wg-invite-reason", role: "status" }, reason),
-    note === null ? null : (0, import_react31.createElement)("span", { className: "bt-set-hint bt-wg-invite-note", role: "status" }, note)
+    reason === null ? null : (0, import_react31.createElement)("span", { className: "bt-set-hint bt-wg-invset-reason", role: "status" }, reason),
+    note === null ? null : (0, import_react31.createElement)("span", { className: "bt-set-hint bt-wg-invset-note", role: "status" }, note)
   );
 }
 

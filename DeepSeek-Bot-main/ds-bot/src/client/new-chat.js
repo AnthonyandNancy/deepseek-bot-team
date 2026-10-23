@@ -85,7 +85,9 @@ export function NewChat({ mode, roster, actions }) {
         actions.openWorkgroup?.(created.id)
         close()
       } catch (failure) {
-        if (failure?.code === 'hub/not-signed-in') {
+        // `hub/signed-out` is the same situation reached from the other side: a stored session the
+        // Hub refused has just been discarded, so the person needs the same next step.
+        if (failure?.code === 'hub/not-signed-in' || failure?.code === 'hub/signed-out') {
           throw Object.assign(new Error(t('A workgroup lives on the Hub. Sign in first, then create it.')), { code: failure.code, needsHub: true })
         }
         throw failure

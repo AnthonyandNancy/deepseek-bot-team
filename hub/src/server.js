@@ -411,7 +411,13 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
       })
       const address = server.address()
       const scheme = config.tls === null ? 'http' : 'https'
-      logger.info('hub.listening', { scheme, host: address.address, port: address.port, tls: config.tls !== null })
+      // Which database this Hub is actually serving, printed on every start. Without it, "signed in
+      // but the refresh token is not valid" is indistinguishable from a real credential problem,
+      // when the usual cause is a second Hub started from a different directory and therefore
+      // holding a different, empty file.
+      logger.info('hub.listening', {
+        scheme, host: address.address, port: address.port, tls: config.tls !== null, dataDir: config.dataDir,
+      })
       // Said out loud, once, when the operator has accepted plaintext beyond loopback: this is the
       // state in which a password typed on one machine crosses the local network in the clear.
       if (config.tls === null && !isLoopback(address.address)) {

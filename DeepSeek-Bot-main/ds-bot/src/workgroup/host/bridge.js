@@ -83,6 +83,11 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
   // Set when there is no stored account to connect with. A retry loop would be pointless, and the
   // account page must be able to say "sign in" rather than "reconnecting forever".
   let signedOut = false
+  // The Hub answered, and its answer was that this session no longer exists. `signedOut` also covers
+  // "there was never an account" and "the user just signed out", and neither of those is news; this
+  // one is, because a person who believed they were signed in needs to be told to sign in again
+  // rather than told the Hub is unreachable.
+  let sessionRefused = false
   let connecting
   // Resolves when the Hub has greeted this socket (or refuses it), so `start()` answers with a fact
   // rather than with "a WebSocket object now exists". Without it, `hub-login` reported
@@ -433,7 +438,11 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
         ws.addEventListener('message', noteFrame)
       } catch (error) {
         socket = undefined
-        // No stored account is not a failure to retry: the user has not signed in.
+        // No stored account is not a failure to retry: the user has not signed in. A session the Hub
+        // refused is the same conclusion from a different cause — the record was just deleted, so
+        // reconnecting would only repeat a doomed handshake. The reason is kept for `status()`, so a
+        // caller can say "sign in again" instead of blaming the Hub.
+        if (error?.code === 'hub/signed-out') { attempts = 0; signedOut = true; sessionRefused = true; stopped = true; return }
         if (error?.code === 'hub/not-signed-in') { attempts = 0; signedOut = true; stopped = true; return }
         emit('error', { message: String(error?.message ?? error) })
         scheduleReconnect()
@@ -466,6 +475,7 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     async start() {
       stopped = false
       signedOut = false
+      sessionRefused = false
       // A cached `auth` from before a stop is still the same account, and `socketAuth()` re-mints
       // the access token; keeping it avoids a Hub round trip on every reconnect. It is dropped on
       // `reset()` (sign-out), where the account itself changed.
@@ -477,6 +487,10 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
         auth = undefined
         await connect()
       }
+      // Never throws while there is no account: a team with no Hub has to behave exactly like the G3
+      // team, and that rule is pinned by a test. What it must not do is hide a session the Hub
+      // refused, because then a caller reports a Hub problem when the session is what is gone —
+      // `bridge.status().refused` carries that reason for anyone who can act on it.
       return bridge.status()
     },
 
@@ -514,6 +528,9 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
         state: signedOut
           ? 'signed-out'
           : connected() ? 'online' : stopped ? 'offline' : 'connecting',
+        // True only when the Hub itself refused the stored session. The account page and the
+        // workgroup create path read this to say "sign in again" rather than "the Hub is down".
+        refused: sessionRefused,
         pending: [...groups.values()].reduce((total, entry) => total + entry.outbox.length, 0),
         groups: [...groups.values()].map(entry => ({ workgroupId: entry.workgroupId, cursor: entry.cursor, pending: entry.outbox.length })),
       }

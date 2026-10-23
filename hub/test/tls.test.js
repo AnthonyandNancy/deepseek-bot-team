@@ -12,8 +12,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { ConfigError, isLoopback, loadConfig } from '../src/config.js'
+import { dirname, join, resolve, isAbsolute } from 'node:path'
+import { ConfigError, DEFAULT_DATA_DIR, isLoopback, loadConfig } from '../src/config.js'
 import { createHub } from '../src/server.js'
 import { createMemoryLogger } from '../src/log.js'
 import { PASSWORD, PHONE_A, testConfig } from './helpers.js'
@@ -86,6 +86,26 @@ test('ttl and port values are validated rather than taken on trust', () => {
   // Seconds in, milliseconds out: an operator writing 30 means half a minute, not 30 ms.
   assert.equal(loadConfig({ ...base, HUB_ACCESS_TTL: '30' }).accessTtlMs, 30_000)
   assert.equal(loadConfig(base).accessTtlMs, 30 * 60 * 1000)
+})
+
+test('the data directory is absolute, so the working directory cannot change which database is used', () => {
+  // The default used to be the relative string `hub/.data`, resolved against whatever directory the
+  // process happened to start in. `npm start` from `hub/` therefore opened `hub/hub/.data`, while the
+  // same command from the repository root opened `hub/.data` — two different files, so an account
+  // registered in one was "not valid" in the other. A relative value is resolved once here, at the
+  // single place every data path is derived from, so no later code can disagree about the file.
+  const relative = loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: '1', HUB_DATA_DIR: 'some/where' })
+  assert.equal(isAbsolute(relative.dataDir), true, 'a relative HUB_DATA_DIR must be made absolute')
+  assert.equal(relative.dataDir, resolve('some/where'))
+
+  // The default has the same problem and the same fix.
+  const fallback = loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: '1' })
+  assert.equal(isAbsolute(fallback.dataDir), true, 'the default data directory must be absolute')
+  assert.equal(fallback.dataDir, resolve(DEFAULT_DATA_DIR))
+
+  // An absolute value passes through as given, because an operator who names a path means it.
+  const absolute = process.platform === 'win32' ? 'C:\\hub-data' : '/var/lib/hub'
+  assert.equal(loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: '1', HUB_DATA_DIR: absolute }).dataDir, absolute)
 })
 
 test('loopback addresses are recognised in every form a listener reports', () => {

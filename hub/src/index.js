@@ -15,8 +15,11 @@ try {
   }
   process.on('SIGINT', () => void shutdown('SIGINT'))
   process.on('SIGTERM', () => void shutdown('SIGTERM'))
-  // The URL is printed so the operator can put it in the plugin's Hub account page.
-  process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), level: 'info', event: 'hub.ready', url })}\n`)
+  // The URL is printed so the operator can put it in the plugin's Hub account page, and the
+  // database path beside it: a Hub started from a different directory opens a different (usually
+  // empty) file, and the only symptom used to be a signed-in plugin whose stored refresh token was
+  // "not valid". Printing both makes that comparison possible at a glance.
+  process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), level: 'info', event: 'hub.ready', url, dataDir: hub.config.dataDir })}\n`)
 } catch (error) {
   if (error instanceof ConfigError) {
     process.stderr.write(`hub: ${error.message}\n`)

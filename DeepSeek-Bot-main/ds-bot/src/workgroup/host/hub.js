@@ -127,6 +127,21 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
 
   const address = () => trimBase(account?.baseUrl)
 
+  // Which refusals from `/v1/auth/refresh` mean the stored record can never work again, and which
+  // only mean "not right now".
+  //
+  // The Hub answers 401 for a token it has no row for, one that was already rotated, one that
+  // expired, and one whose session was ended. In every one of those cases the token is gone for
+  // good — rotation is single-use, so a rejected token is never going to be accepted on a retry.
+  // Without this, a machine whose Hub database was replaced kept the dead record on disk, reported
+  // itself as signed in, and failed every single call with "The refresh token is not valid." That is
+  // indistinguishable, from the page, from a working account.
+  //
+  // Anything else — an unreachable Hub, a TLS rejection, a 500 — is a condition that can pass, so the
+  // record is kept and the next attempt retries it. Deleting on a network blip would silently sign
+  // the person out of a fine session.
+  const sessionRefused = error => error?.status === 401
+
   // Refreshes the access token from the stored refresh token, so no caller has to think about
   // lifetime. The Hub rotates both halves, so the stored refresh token is replaced at once:
   // keeping the old one would make the next restart fail to sign in.
@@ -135,7 +150,21 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
     const stored = await store.load()
     if (stored === undefined) throw new HubRequestError('This device is not signed in to the Hub.', { code: 'hub/not-signed-in' })
     const base = trimBase(stored.baseUrl)
-    const refreshed = await call(base, '/v1/auth/refresh', { body: { refreshToken: stored.refreshToken } })
+    let refreshed
+    try {
+      refreshed = await call(base, '/v1/auth/refresh', { body: { refreshToken: stored.refreshToken } })
+    } catch (error) {
+      if (!sessionRefused(error)) throw error
+      // The Hub answered, and its answer was "this session does not exist". Drop the record so the
+      // page shows the sign-in form, and report the state rather than the Hub's wording: the sentence
+      // the person needs is "sign in again", and the account is already gone by the time they read it.
+      clearMemory()
+      await store.clear()
+      throw new HubRequestError(
+        'Your Hub session has ended, so this device was signed out. Sign in to the Hub again.',
+        { code: 'hub/signed-out', status: 401 },
+      )
+    }
     accessToken = refreshed.accessToken
     accessExpiresAt = Date.parse(refreshed.accessExpiresAt)
     account = {

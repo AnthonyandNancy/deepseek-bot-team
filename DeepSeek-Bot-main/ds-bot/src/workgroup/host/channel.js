@@ -182,6 +182,16 @@ export function install(wg) {
           const account = await wg.hub.restore().catch(() => undefined)
           if (account !== undefined) {
             const published = await wg.bridge.start().catch(() => undefined)
+            // A session the Hub no longer knows is not an unreachable Hub: saying so would send the
+            // person to check a service that is running fine, while the real next step is to sign in
+            // again. `hub.js` deletes the dead record, so the only surviving evidence is the bridge's
+            // own refused flag.
+            if (published?.refused === true) {
+              return fail(
+                'Your Hub session has ended, so this device was signed out. Sign in to the Hub again, then create the workgroup.',
+                'hub/signed-out',
+              )
+            }
             if (published === undefined) return fail('Could not reach the Hub, so the workgroup was not created.', 'hub/unreachable')
             const endpoints = await wg.bridge.publishBotEndpoints().catch(() => [])
             const endpointIds = endpoints
@@ -379,8 +389,13 @@ export function install(wg) {
           if (account !== undefined && wg.bridge.status().state === 'offline') {
             await wg.bridge.start().catch(() => {})
           }
+          // Ask again rather than trusting the snapshot above: starting the bridge is what re-mints
+          // the access token, and if the Hub refuses that token the record is gone by now. Answering
+          // `loggedIn: true` from the stale snapshot is what made the page show an account that could
+          // not do anything — the invite control then offered itself and every invite failed.
+          const live = (await wg.hub.restore().catch(() => undefined)) ?? undefined
           return ok({
-            ...(account === undefined ? { loggedIn: false } : { loggedIn: true, account }),
+            ...(live === undefined ? { loggedIn: false } : { loggedIn: true, account: live }),
             bridge: wg.bridge.status(),
             // Which store holds the device key, so the page can say so rather than implying an
             // OS keychain the plugin cannot reach (docs/g3/PLAN.md §0).

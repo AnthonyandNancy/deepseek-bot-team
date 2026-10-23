@@ -1,3 +1,5 @@
+import { resolve } from 'node:path'
+
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 
 // Whether a peer address is this machine. `::ffff:127.0.0.1` is what a dual-stack
@@ -16,6 +18,12 @@ export class ConfigError extends Error {
 }
 
 const DEFAULT_PORT = 7788
+// Resolved against the working directory ONCE, in `loadConfig`, so that no two starts of the same
+// command can silently pick different files. This used to stay relative, which meant `npm start`
+// from `hub/` opened `hub/hub/.data` while the same command from the repository root opened
+// `hub/.data`: an account registered against one was "not valid" against the other, and nothing on
+// screen could show that the two were different databases.
+export const DEFAULT_DATA_DIR = 'hub/.data'
 const DEFAULT_ACCESS_TTL_MS = 30 * 60 * 1000
 const DEFAULT_REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
@@ -78,7 +86,7 @@ export function loadConfig(env = process.env) {
     allowPlaintextLan,
     // Loopback in plaintext unless the operator accepted the local network explicitly.
     insecureLoopbackOnly: cert === undefined && !allowPlaintextLan,
-    dataDir: env.HUB_DATA_DIR ?? 'hub/.data',
+    dataDir: resolve(env.HUB_DATA_DIR ?? DEFAULT_DATA_DIR),
     accessTtlMs: readTtl(env.HUB_ACCESS_TTL, DEFAULT_ACCESS_TTL_MS, 'HUB_ACCESS_TTL'),
     refreshTtlMs: readTtl(env.HUB_REFRESH_TTL, DEFAULT_REFRESH_TTL_MS, 'HUB_REFRESH_TTL'),
     logLevel: env.HUB_LOG_LEVEL ?? 'info',

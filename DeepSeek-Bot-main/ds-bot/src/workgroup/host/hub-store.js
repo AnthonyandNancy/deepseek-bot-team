@@ -108,9 +108,19 @@ export function createHubStore({ ctx, home, logger } = {}) {
     },
 
     async clear() {
-      if (seam?.modifyRecord !== undefined) {
-        // `undefined` from the mutate means "remove this record", which is the seam's own way
-        // to delete.
+      // Removal is `deleteRecord`. The previous version used `modifyRecord(..., () => undefined)` and
+      // believed that meant "delete"; in the Harness's provider it means "leave the record alone" and
+      // returns early without writing. Every sign-out therefore kept the account on disk, the page
+      // went on saying "signed in", and signing in again was refused because a record was already
+      // there. Nothing throws in that path, so no test noticed until one modelled the provider's
+      // semantics instead of assuming them.
+      if (seam?.deleteRecord !== undefined) {
+        // Best effort, like the file branch below: a seam that refuses must not leave the user stuck
+        // signed in with no way out. The file fallback is still attempted.
+        await seam.deleteRecord(CREDENTIAL_KEY).catch(() => {})
+      } else if (seam?.modifyRecord !== undefined) {
+        // A provider with no `deleteRecord` predates this contract; there is no way to remove a record
+        // through it, so an empty grant is the closest thing to "signed out" that it can store.
         await seam.modifyRecord(CREDENTIAL_KEY, async () => undefined).catch(() => {})
       }
       await unlink(file).catch(error => { if (error?.code !== 'ENOENT') throw error })

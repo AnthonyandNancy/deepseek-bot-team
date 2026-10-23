@@ -9,6 +9,7 @@
 // loopback, which the Hub permits only with its explicit opt-in.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { generateKeyPairSync } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -167,6 +168,64 @@ test('a rotated access token is re-minted from the stored refresh token', async 
   // The Hub rotates refresh tokens, so the stored one must have been replaced.
   const after = (await store.load()).refreshToken
   assert.notEqual(after, before)
+})
+
+test('a refresh token the Hub refuses is discarded instead of retried forever', async (t) => {
+  // The exact failure that made a signed-in machine unable to create a workgroup: the Hub answered
+  // `401 The refresh token is not valid.`, and every later call repeated the same doomed exchange
+  // because the useless record stayed on disk. The page kept saying "signed in" and nothing said why
+  // nothing worked.
+  //
+  // A refused refresh token can never become valid again — the Hub rotates on use, so a rejected one
+  // is spent, revoked, expired, or belongs to a database this Hub no longer has. The only honest
+  // outcome is to drop it and report being signed out, which is what the account page can act on.
+  const { baseUrl } = await withHub(t)
+  const { client, store } = withClient(t)
+  await client.authenticate({ baseUrl, phone: PHONE, password: PASSWORD, mode: 'register' })
+
+  // Simulate the state a lost or replaced Hub database leaves behind: a well-formed token this Hub
+  // has never seen. It is not a corrupted file — it is exactly what survives a `hub/.data` wipe.
+  const stored = await store.load()
+  await store.save({ ...stored, refreshToken: 'dsb_rt_thisTokenWasNeverIssuedByThisHub' })
+
+  const restarted = createHubClient({ store })
+  await restarted.restore()
+  // Before the fix this reported true, because a stored record counts as signed in — and then every
+  // request failed with the Hub's 401 while the page still showed an account.
+  assert.equal(restarted.loggedIn, true, 'the stored record is what the page sees before it asks')
+  await assert.rejects(() => restarted.me(), (error) => {
+    assert.equal(error.code, 'hub/signed-out', 'the error must name the state the page should show')
+    return true
+  })
+
+  // The dead record is gone, so the page shows the sign-in form rather than a session that cannot
+  // do anything, and a retry does not replay the same token.
+  assert.equal(await store.load(), undefined, 'the refused record must not be kept')
+  assert.equal(restarted.loggedIn, false)
+  await assert.rejects(() => restarted.me(), error => error.code === 'hub/not-signed-in')
+})
+
+test('an unreachable Hub is not mistaken for a refused session', async (t) => {
+  // The distinction the account page depends on: "your session ended, sign in again" and "the Hub is
+  // not running" need different actions from the person reading them. Only an answered 401 from the
+  // refresh endpoint may clear the record; a transport failure must leave it for the next attempt.
+  const { store } = withClient(t)
+  await store.save({
+    baseUrl: 'http://127.0.0.1:1',
+    hubUserId: 'usr_someone',
+    phoneMasked: '+86****8000',
+    deviceId: 'dev_someone',
+    refreshToken: 'dsb_rt_aTokenThatWouldBeFine',
+    privateKeyPem: generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }),
+  })
+  const before = await store.load()
+  const unreachable = createHubClient({
+    store,
+    fetchImpl: async () => { throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } }) },
+  })
+  await assert.rejects(() => unreachable.me(), error => error.code === 'hub/unreachable')
+  assert.notEqual(await store.load(), undefined, 'an unreachable Hub must not delete the account record')
+  assert.equal((await store.load()).refreshToken, before.refreshToken)
 })
 
 test('signing out clears the local record even when the Hub cannot be reached', async (t) => {

@@ -64,10 +64,25 @@ export function WorkgroupRow({ room, roster, actions, wide }) {
 
 // The marker's own styles. Installed with the shell group, so it is present exactly when
 // the original sidebar is.
+//
+// The invite row's layout lives here rather than in WG_CSS because of where the row is drawn: it
+// sits in the group-settings drawer, while WG_CSS is installed by the panel from inside the panel's
+// own module. A row whose styles arrive only with a different surface renders as an unstyled column
+// of text — which is what happened, and why the field squeezed the hint to two characters per line.
+// This stylesheet is installed with the shell, so the drawer always has it.
 export const WORKGROUP_ROW_CSS = `
 .bt-row-workgroup .bt-row-name{display:flex;align-items:center;gap:6px;min-width:0}
 .bt-wg-chip{flex:none;display:inline-flex;align-items:center;gap:3px;height:17px;padding:0 5px;border-radius:5px;border:.5px solid var(--bt-line-2);background:var(--bt-tag-bg);color:var(--bt-tag-ink);font-size:10px;line-height:1;font-weight:500;white-space:nowrap;letter-spacing:0}
 .bt-wg-chip-glyph{font-size:9px;opacity:.75}
 .bt-rail .bt-row-workgroup{position:relative}
 .bt-wg-dot{position:absolute;right:6px;bottom:6px;width:5px;height:5px;border-radius:50%;background:var(--bt-ink-2);box-shadow:0 0 0 1.5px var(--bt-sidebar)}
+/* The invite row. Stacked, because it holds two things a person reads (label, hint) and two they act
+   on (a field, a button); the two-column row it borrowed first gave the field all the room and left
+   the sentence three characters wide. The input keeps a minimum so a long id stays readable, and the
+   hint wraps instead of being clipped. */
+.bt-wg-invset{gap:8px}
+.bt-wg-invset-field{display:flex;align-items:center;gap:8px;width:100%;min-width:0}
+.bt-wg-invset-field>.bt-input{flex:1 1 auto;min-width:0;height:32px}
+.bt-wg-invset-field>.bt-soft{flex:none}
+.bt-wg-invset-reason,.bt-wg-invset-note{overflow-wrap:anywhere}
 `
