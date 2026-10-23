@@ -147,3 +147,69 @@
   - `ds-bot/test/workgroup-g4-api.test.js`：新增 `signing out really signs out, and signing in again works`——走产品路径断言 `hub-logout` 后 `hub-state.loggedIn === false`、`hubStore.load() === undefined`，且能再次 `hub-login` 成功
 - 验证：`ds-bot` **1038 tests / 1037 pass / 1 skip / 0 fail**；`hub` **257 pass / 0 fail**；lint **0 error / 13 warning**；`--check` exit 0；`src/host/` 零改动
 - 用户侧待办：修复后**再点一次「退出登录」**即可清掉 `~/.dsh/.credentials.yaml` 里残留的那条记录（不手工改用户 DSH 数据）
+
+## 2026-10-23 · 建工作群报 `The group name must be text.`（用户截图报告）
+
+- 现象：创建工作群聊失败，底部红字 `The group name must be text.`
+- **先核对迁移完整性（用户要求）**：命名链路是完整的。
+  - 原版 `src/host/roster.js:296` `autoRoomName = members => ['You', ...members.map(id => rt.botOf(id)?.name)].join(', ')`
+  - 复制版 `src/workgroup/host/groups.js:217` `autoWorkgroupName(members, createdAt)` 同源，并额外附创建时间戳（有注释说明是有意增强）
+  - 复制版 `createWorkgroup` 里 `const title = custom !== '' ? custom : autoWorkgroupName(...)`（`groups.js:309`）——本地房间一直都拿得到名字
+  - 原版 `holdName` + `cleanRoomName` 的**重名校验**未迁移，但 `groups.js:308-312` 有明确记载的产品决定：工作群身份是 id（`wg-<uuid>`），名字只是标签，允许同名。**这是有意的，不是漏迁。**
+- 真因：**本地名字推导对了，但没传给 Hub**。`channel.js:201` 写的是
+  ```js
+  name: name.trim() === '' ? undefined : name,     // 旧代码
+  ```
+  `JSON.stringify` 会把 `undefined` 字段整个丢掉，Hub 的 `text(body.name, 'The group name', ...)`（`hub/src/workgroups/services.js:182`）拿到 `undefined` 就抛 `The group name must be text.`。于是**整个建群失败**，连本地房间都没建出来——用户说的「回到起点」是准确的。
+- 为什么测试没抓到：现有 13 个 G4 用例**每一个都传了 `name`**（`{ name: '会议记录' }`），没有一条走"不填名字"这条真实主路径。
+- 改动：
+  - `ds-bot/src/workgroup/host/groups.js`：导出 `wg.autoNameFor(members)`（不带时间戳——Hub 行是给别人看的，创建时间是噪音）
+  - `ds-bot/src/workgroup/host/channel.js`：`name: name.trim() === '' ? wg.autoNameFor?.(members) ?? 'Workgroup' : name.trim()`
+  - `ds-bot/test/workgroup-g4-api.test.js`：新增 `a workgroup created without a name still gets one`——完全不传 `name`，断言建群成功、Hub 上有非空名字、且**本地房间名与 Hub 名字一致**
+- 验证：`ds-bot` **1039 tests / 1038 pass / 1 skip / 0 fail**；`hub` **257 pass / 0 fail**；lint **0 error / 13 warning**；`--check` exit 0；`src/host/` 零改动；`app/node_modules/ds-bot` 经 junction 已看到新构建
+
+## 2026-10-23 · 建群后没有群头像、没有成员（用户截图报告）
+
+- 现象：工作群建出来了（标题 `You, Chief, 路人甲A, 路人甲B`），但右侧详情「4 位成员」下面是「成员 · 0」，且**没有群头像**
+- **先核对迁移完整性（用户要求）**：`GroupOverview` / `MemberPile` / `MemberRow` 是原版 `details-drawer.js` 里的群概览组件，**从未被复制到工作群域**（`src/workgroup/client/` 下只有 `group-settings.js`、`panel.js`、`rows.js`、`invite.js`、`tasks.js`，没有任何概览组件）。工作群是靠 `sources.js` 把记录适配成"原版组件能读的形状"来复用原版组件的——**适配层才是迁移点，而它错了**
+- 真因（用探针在真实产品路径上实测，不靠推断）：
+  - **Host 完全正确**：`create-room` 后 `room.members` 有 3 条完整记录（2 个 `remoteBot` + 1 个 `user`），Hub 侧 roster 也齐全
+  - **客户端适配层错**：`groupRooms()` 把成员**压平成 id**
+    ```js
+    members: (room.members ?? []).map(member => member.id)   // 旧代码
+    ```
+    而这些 id 是 Hub 的 `ep_…` / `usr_…`，`roster.byId` 里只有本机 Bot，**全部查不到**。原版组件写的是 `room.members.map(id => roster.byId[id]).filter(Boolean)`，于是：
+    - 详情标题读 `room.members.length` →「4 位成员」（对）
+    - 成员列表走 `byId` 解析 → 全部落空 →「成员 · 0」（错）
+    - `MemberPile`（群头像 = 成员头像堆叠）同样全部落空 → **空白，没有头像**
+  - 两处数字自相矛盾，就是同一个数据被两种方式解读的直接证据
+- 为什么测试没抓到：`groupRooms` / `indexRoster` **零测试覆盖**；现有工作群测试都停在 host 侧，没人验证过 `roomsById`/`byId` 里到底有没有成员
+- 改动：
+  - `ds-bot/src/client/sources.js`：`groupRooms()` 保留成员**记录**而不是压平成 id；`indexRoster()` 把这些成员也登记进 `byId`（放在 bots 之后，本地 Bot 优先；不写进 `bots`，所以 Bots 列表和计数不受影响）
+  - `ds-bot/src/client/details-drawer.js`：新增 `memberOf(entry, roster)` 帮手——记录就是它自己，id 才查 `byId`；`GroupOverview` 与 `MemberPile` 两处绘制点改用它
+  - `ds-bot/test/workgroup-roster-shape.test.js`（新建，4 条）：成员记录保留、`byId` 能解析、**本地群形状完全不变**（回归保护）、两个绘制点都走 `memberOf` 且能对两种形状给出正确名字
+- 说明：群头像 = 成员头像堆叠（原版设计），成员一旦能解析，头像自然出现；远端成员没有自定义头像时，`lookOf()` 按 `id` 生成确定性的角色形象
+- 验证：`ds-bot` **1043 tests / 1042 pass / 1 skip / 0 fail**；`hub` **257 pass / 0 fail**；lint **0 error / 13 warning**；`--check` exit 0；`src/host/` 零改动
+
+---
+
+## 2026-10-23 · G5 · 更正上一轮：成员必须是 **id**，缺的是 `byId` 登记
+
+上一轮把 `room.members` 改成了成员**记录**对象，方向错了。用户重启后的截图把它证伪了：群头像仍是一个**黑色 gumdrop**。
+
+- 决定性证据：`lookOf(undefined)` 的结果就是「黑色 gumdrop」（`characters.js:37,67,71`，`FALLBACK_SHAPE='gumdrop'`，无 id 时 `colorOf` 返回 `'black'`）。截图里头像发黑，说明 `RoomAvatar` 解析出来的成员数**是 0**。
+- 上一轮为什么也解析不出来：`RoomAvatar` / `GroupSettingsForm` 写的都是 `roster.byId[id]`，把**记录对象**当 key 会变成 `"[object Object]"`，同样查不到。两种写法都掉进同一个坑，只是方向相反。
+- 原版组件的契约是明确的：`room.members` 是 **id 列表**，id 通过 `roster.byId` 解析。**不要把记录塞进 members，要让 byId 能回答这些 id。**
+- 真因（两半必须同时成立）：
+  1. `groupRooms()` 把成员记录压平成 `ep_…` / `usr_…` —— 这一步本来就对，保持不动
+  2. `indexRoster()` 从没把这些 id 登记进 `byId` —— 这才是缺的一半
+- 修复（单文件 `ds-bot/src/client/sources.js`）：
+  - `groupRooms()` **完全恢复原样**（成员压平成 id）
+  - `indexRoster()` 在 bots 之后、agents 之前，新增遍历把所有工作群成员的**记录**登记进 `byId`；本地 Bot 优先；**不写进 `roster.bots`**，所以 Bots 列表、成员计数、"@" 菜单全部不受影响
+  - 抽出 `workgroupMembers(workgroups)` 帮手：只收有 `id` 的成员记录，无 id 的丢掉而不是索引成 `undefined`
+  - `details-drawer.js` 的 `memberOf` 帮手 **撤销**（原是上一轮的错误修复），该文件恢复原版
+- 一次登记，所有消费方同时被修好（实测）：成员列表、群头像、`roomSubtitle` 的管理员名、`shownMode`、`at-menu`、`user-message` 的 @ 提及、`member-status` 的成员状态
+- 测试重写 `ds-bot/test/workgroup-roster-shape.test.js`（5 条，断言**正确契约**）：members 必须是 id 列表、每个 id 必须能通过 `byId` 解析出可画的名字、登记不污染 `roster.bots`、本地群形状零变化、原版组件（`mark.js` / `group-settings.js`）的 id 查找语句**必须保持原样**
+- 变异验证：撤掉修复 → `every member id a workgroup hands out resolves through byId` **失败**；恢复 → 5/5 通过。证明这条测试真的能抓住这个 bug，不是摆设
+- 验证：`ds-bot` **1044 tests / 1043 pass / 1 skip / 0 fail**；lint **0 error / 13 warnings**；`--check` exit 0；`src/host/` 零改动
+- 顺带修：`app/node_modules/ds-bot` 的 junction 又被 `npm install` 冲成真实副本且已过期；用**绝对路径**重建（相对路径会被 `mklink` 按当前目录解析，第一次重建指错到 `D:\code\ai\DeepSeek-Bot\ds-bot`），已确认 `client.js` 与源构建逐字节相同且含本次修复

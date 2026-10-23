@@ -231,6 +231,15 @@ export function install(wg) {
   }
   wg.checkMembers = checkMembers
 
+  // The automatic name, exposed because the Hub needs it BEFORE the local room exists: the Hub
+  // requires text, and the composer legitimately sends none. Keeping it a single function means the
+  // name the Hub stores and the name the local room derives cannot drift apart — which they did while
+  // the Hub call passed `undefined` and failed with "The group name must be text."
+  //
+  // No timestamp here: this names a group that is being created right now, and the Hub row is read by
+  // other people, for whom a creation timestamp is noise rather than a way to tell two groups apart.
+  wg.autoNameFor = members => ['You', ...(members ?? []).map(member => member?.name).filter(Boolean)].join(', ')
+
   // A workgroup made before the "a group is a Session" fix has a synthetic `wg-<uuid>` id
   // and no Session, so there is nothing to open. Such a record is upgraded in place the
   // first time it is touched: a Session is created, the room is re-keyed to it, and the

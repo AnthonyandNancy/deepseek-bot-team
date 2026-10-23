@@ -198,7 +198,15 @@ export function install(wg) {
               .filter(endpoint => members.some(member => String(member?.id) === String(endpoint.localBotId)))
               .map(endpoint => endpoint.endpointId)
             const created = await wg.bridge.createWorkgroup({
-              name: name.trim() === '' ? undefined : name,
+              // The name the local room would use, because the Hub requires text and the composer legitimately
+              // sends none. The original derives "You, Chief, …" from the members
+              // (src/host/roster.js `autoRoomName`) and this domain's copy does the same in
+              // `autoWorkgroupName`; sending `undefined` here instead made the Hub refuse the whole
+              // create with "The group name must be text.", so no workgroup was ever made.
+              //
+              // Derived from the ROSTER (names as the Hub will show them), not from the composer's
+              // list: a member this machine cannot name would otherwise contribute nothing.
+              name: name.trim() === '' ? wg.autoNameFor?.(members) ?? 'Workgroup' : name.trim(),
               notice: notice === '' ? undefined : notice,
               endpointIds: endpointIds.length === 0 ? undefined : endpointIds,
             })

@@ -1497,6 +1497,9 @@ function indexRoster(value, workgroups) {
   const roomsById = {};
   for (const room2 of value.rooms) roomsById[room2.id] = room2;
   for (const room2 of groupRooms(workgroups)) roomsById[room2.id] = room2;
+  for (const member of workgroupMembers(workgroups)) {
+    if (byId[member.id] === void 0) byId[member.id] = member;
+  }
   const agentsById = {};
   const agentOf = {};
   for (const agent of value.agents ?? []) {
@@ -1512,6 +1515,15 @@ function groupRooms(workgroups) {
     admin: room2.adminId ?? null,
     workgroup: true
   }));
+}
+function workgroupMembers(workgroups) {
+  const members = [];
+  for (const room2 of workgroups ?? []) {
+    for (const member of room2.members ?? []) {
+      if (member !== null && typeof member === "object" && member.id !== void 0 && member.id !== null) members.push(member);
+    }
+  }
+  return members;
 }
 function isAgentSession(roster, cache, sessionId) {
   if (sessionId === void 0 || sessionId === null || sessionId === "") return false;
