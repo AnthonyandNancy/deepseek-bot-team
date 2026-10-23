@@ -25,10 +25,18 @@ export function WorkgroupBadge({ wide = true }) {
 // A workgroup row. `room` is a workgroup from `wg.view()`: members are objects
 // (`{id, name, kind}`), whereas the original's are ids — so the id list is adapted before
 // it reaches `RoomAvatar`, which is the original component and is left untouched.
-export function WorkgroupRow({ room, roster, actions, wide }) {
+//
+// `useSessionRetainInfo` is the original row's own way of knowing it is the one on screen
+// (`src/client/sidebar.js` `RoomRow`): a Session is selected while the main view retains it. This
+// row did not take it, so a selected workgroup drew exactly like an unselected one — the reported
+// 「选中工作群，没有选中的样式」 — while the local group beside it highlighted. Nothing new is
+// invented here: the same hook, the same attribute, the same original stylesheet rule
+// (`.bt-row[aria-current=page]{background:var(--bt-active)}`).
+export function WorkgroupRow({ room, roster, actions, useSessionRetainInfo, wide }) {
   const members = room.members ?? []
   const memberIds = members.map(member => member.id)
   const linked = room.linkedLocalName
+  const active = useSessionRetainInfo?.(room.id, info => (info?.retainedBy?.mainView ?? 0) > 0) === true
   const label = [
     t('Workgroup'),
     room.name,
@@ -39,6 +47,7 @@ export function WorkgroupRow({ room, roster, actions, wide }) {
     type: 'button',
     className: 'bt-row bt-row-workgroup',
     'aria-label': label,
+    'aria-current': active ? 'page' : undefined,
     // The row ellipsises a long name; hovering shows it whole, as a local group does.
     title: room.name,
     'data-workgroup-id': room.id,

@@ -426,3 +426,71 @@ Hub 的端点 id 仍然保留在 `member.endpointId` 上（寻址端点需要它
   - 恢复 `permission: null` → 「does not claim a shared permission」失败
   - 撤掉 Session 键迁移 → 「keeps its group Session」失败
   - 撤掉 `adopt()` 自愈 → 「stored permission: null」失败
+
+---
+
+## 2026-02-14 — 侧栏选中态 + 删除工作群后复活
+
+**用户报告**：①「左侧操作栏，选中工作群，没有选中的样式」②「删除工作群，采取本应用后又出现了，反而本地群不会」
+
+### ① 选中态：行复制了，选中逻辑没复制
+
+原版用 `.bt-row[aria-current=page]{background:var(--bt-active)}` 画选中态，本地群有高亮，
+因为它调 `useSessionRetainInfo(room.id, …)`。工作群行缺两处：
+
+1. `WorkgroupRow` 里**完全没有** `aria-current`
+2. `sidebar.js` 渲染它时手工拼 props，**漏传** `useSessionRetainInfo`
+   （本地群行经 `...rowProps` 自动带上）
+
+即典型「复制后漏掉一半」。修法是把原版那套照搬：同一个 hook、同一个属性、同一条样式规则，
+不新增任何工作群专属选中样式（有测试禁止 `[data-selected]` 这类第二条路径）。
+side bar 改为 `...rowProps`，顺带补上 `marked` 未读标记。
+
+### ② 删除后复活：只删了本地，Hub 上还在
+
+实测证据：
+
+```
+after delete, local room: GONE
+hub still lists: 1 ["wg_de2cc5…"]
+AFTER RESTART, rooms with that hub id: 1
+adopted back? YES (BUG)
+```
+
+根因两层：
+
+1. `delete-room` 只删本地记录，**从未通知 Hub**
+2. `adoptHubGroups` 每次启动扫描 Hub 群列表，本地缺就重建 → 刚删的群被拉回
+
+本地群不复发，因为它只存在本机，没有外部来源能把它拉回来。
+
+**测试漏洞（这轮一并修）**：先前写的该测试是**假通过**——`reopenDomain` 的假 ctx 缺
+`workspaceRegistry`，采纳时抛错被自身 `catch` 吞掉。补全 ctx 后测试立即真实失败。
+
+**产品决策（用户定）**：删除 = **真正解散**（Hub 上删除，所有成员都失去它）；
+群主**可以退出**，所有权转交给下一位真人同事。
+
+Hub 侧新增：
+
+- `POST /v1/workgroups/:id/delete` → `dissolve()`，仅群主，`DELETE FROM workgroups`
+  一条语句完成——所有相关表都是 `ON DELETE CASCADE` 且 `PRAGMA foreign_keys = ON`
+- `removeMember` 不再用 `owner-cannot-leave` 硬拒：群主离开时 `handOverOwner()` 转交给
+  下一位 `member_type = 'user'` 的成员（**不转交 Bot**：`role` 决定谁能邀请，
+  转给 Bot 等于把该权限交给它主人的机器）；只剩一人时返回 `workgroup/last-member`，
+  提示「改为删除群」，避免出现无主群
+
+ds-bot 侧：`deleteWorkgroup` **先通知 Hub，成功后再删本地**。顺序理由写在代码里：
+Hub 拒绝时本地未动，群仍可用；Hub 成功而本地保存失败，下次启动只是重新采纳一个
+Hub 上已删除的群，可见且不丢数据。反过来则会在群仍存在时丢掉本地记录。
+
+### 验证
+
+- `ds-bot` **1068 tests / 1067 pass / 1 skip / 0 fail**；`hub` **262 pass / 0 fail**
+- lint **0 error / 13 warnings**；`build-client.mjs --check` exit 0；`src/host/` 零改动
+- 新增 `test/workgroup-row-selected.test.js` 3 条；`workgroup-g4-api.test.js` 增至 29 条
+  （删除后重启不复活、未删除的仍会被采纳）；`hub/test/workgroup-delete.test.js` 5 条
+  （全成员列表移除、仅群主可删、不存在报 404 而非 403、群主退出并转交、最后一人不可退出）
+- 变异验证：
+  - 撤掉 `aria-current` → 「selected workgroup row is marked」失败
+  - 撤掉 `...rowProps` → 「same "am I selected" source」失败
+  - 撤掉 Hub 删除调用 → 「deleted workgroup stays deleted after a restart」失败

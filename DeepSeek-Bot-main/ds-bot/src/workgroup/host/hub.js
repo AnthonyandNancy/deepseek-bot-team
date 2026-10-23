@@ -408,6 +408,13 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
       const token = await ensureAccess()
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}`, { method: 'GET', token })
     },
+    // Deletes the group on the Hub, for everyone. The owner is the only one the Hub accepts this
+    // from. A workgroup lives on the Hub, so deleting it only here left it there to be re-adopted on
+    // the next start (「删除工作群，采取本应用后又出现了」).
+    async deleteWorkgroup(workgroupId) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/delete`, { body: {}, token })
+    },
     async invite({ workgroupId, phone, hubUserId }) {
       const token = await ensureAccess()
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/invites`, {

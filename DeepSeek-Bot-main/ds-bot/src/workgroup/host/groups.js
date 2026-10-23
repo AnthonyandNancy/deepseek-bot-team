@@ -766,6 +766,26 @@ export function install(wg) {
     await wg.load()
     const room = wg.workgroupOf(roomId)
     if (room === undefined) throw new Error('Unknown workgroup')
+    // THE HUB FIRST, THE LOCAL ROOM SECOND.
+    //
+    // A workgroup lives on the Hub, and this only ever deleted the local record. The next start runs
+    // `adoptHubGroups`, which lists the account's groups and makes a local room for each one without
+    // a room — so the group the person had just deleted came back, every time (「删除工作群，采取本应用
+    // 后又出现了，反而本地群不会」; a local group never returns because nothing outside holds it).
+    //
+    // Ordered this way because the two failures are not equal: if the Hub refuses, nothing local has
+    // changed yet and the group is still usable; if the Hub succeeds and this machine then failed to
+    // save, the next start would simply re-adopt a group that had already been deleted — visible, and
+    // not data loss. The reverse order loses the local record for a group that still exists.
+    //
+    // A group that exists only here (no `hubWorkgroupId`) has nothing to tell the Hub, and that is
+    // the local-group case, unchanged.
+    const onHub = room.hubWorkgroupId
+    if (onHub !== undefined) {
+      await wg.hub?.deleteWorkgroup?.(onHub).catch((error) => {
+        throw new Error(error?.message ?? String(error))
+      })
+    }
     // A member's Session is released with the group, and archived the way the
     // original does it, so no turn goes on working for a group that is gone.
     for (const sessionId of Object.values(room.sessions ?? {})) {

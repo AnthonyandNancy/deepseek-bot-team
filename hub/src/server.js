@@ -152,6 +152,15 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
       userId: session.user_id, deviceId: session.device_id, workgroupId: params.id, membershipId: params.memberId,
     })
   })
+  // Deleting a group, by its owner, for everyone. Without this the client's 「删除工作群」 only
+  // removed the local room, so the group came back on the next start.
+  //
+  // POST, not DELETE: `createRouter` has `get` and `post` only, and every other write in this Hub is
+  // a POST with the action in the path.
+  router.post('/v1/workgroups/:id/delete', async ({ params, headers }) => {
+    const session = caller(headers)
+    return workgroups.dissolve({ userId: session.user_id, deviceId: session.device_id, workgroupId: params.id })
+  })
   router.post('/v1/workgroups/:id/invites', async ({ params, body, headers }) => {
     const session = caller(headers)
     return created(await workgroups.invite({

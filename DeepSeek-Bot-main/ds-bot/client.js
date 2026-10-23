@@ -6196,10 +6196,11 @@ function WorkgroupBadge({ wide = true }) {
     (0, import_react11.createElement)("span", null, t("Workgroup"))
   );
 }
-function WorkgroupRow({ room: room2, roster, actions, wide }) {
+function WorkgroupRow({ room: room2, roster, actions, useSessionRetainInfo, wide }) {
   const members = room2.members ?? [];
   const memberIds = members.map((member) => member.id);
   const linked = room2.linkedLocalName;
+  const active = useSessionRetainInfo?.(room2.id, (info) => (info?.retainedBy?.mainView ?? 0) > 0) === true;
   const label = [
     t("Workgroup"),
     room2.name,
@@ -6212,6 +6213,7 @@ function WorkgroupRow({ room: room2, roster, actions, wide }) {
       type: "button",
       className: "bt-row bt-row-workgroup",
       "aria-label": label,
+      "aria-current": active ? "page" : void 0,
       // The row ellipsises a long name; hovering shows it whole, as a local group does.
       title: room2.name,
       "data-workgroup-id": room2.id,
@@ -7703,7 +7705,7 @@ function TeamSidebar(props) {
       "div",
       { ref: listRef, className: "bt-list", role: "region", "aria-label": t("Bot list") },
       main ? (0, import_react15.createElement)(BotRow, { ...rowProps, bot: main, marked: markedUnread[main.id] === true }) : roster.ready ? null : (0, import_react15.createElement)("div", { className: "bt-hint" }, t("Setting up your Main Bot…")),
-      order.map((entry) => entry.kind === "bot" ? (0, import_react15.createElement)(BotRow, { key: entry.item.id, ...rowProps, bot: entry.item, marked: markedUnread[entry.item.id] === true }) : entry.kind === "room" ? (0, import_react15.createElement)(RoomRow2, { key: entry.item.id, ...rowProps, room: entry.item, marked: markedUnread[entry.item.id] === true }) : entry.kind === "workgroup" ? (0, import_react15.createElement)(WorkgroupRow, { key: entry.item.id, room: entry.item, roster, actions: rowActions, wide }) : (0, import_react15.createElement)(AgentRow, { key: entry.item.id, ...rowProps, agent: entry.item, marked: markedUnread[entry.item.id] === true }))
+      order.map((entry) => entry.kind === "bot" ? (0, import_react15.createElement)(BotRow, { key: entry.item.id, ...rowProps, bot: entry.item, marked: markedUnread[entry.item.id] === true }) : entry.kind === "room" ? (0, import_react15.createElement)(RoomRow2, { key: entry.item.id, ...rowProps, room: entry.item, marked: markedUnread[entry.item.id] === true }) : entry.kind === "workgroup" ? (0, import_react15.createElement)(WorkgroupRow, { key: entry.item.id, ...rowProps, room: entry.item, marked: markedUnread[entry.item.id] === true }) : (0, import_react15.createElement)(AgentRow, { key: entry.item.id, ...rowProps, agent: entry.item, marked: markedUnread[entry.item.id] === true }))
     )
   );
 }

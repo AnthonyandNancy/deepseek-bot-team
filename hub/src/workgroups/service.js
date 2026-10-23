@@ -178,6 +178,24 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
     return found
   }
 
+  // Hand leadership to the next PERSON in the group, so an owner can leave one.
+  //
+  // The owner could not leave at all before (`workgroup/owner-cannot-leave`), because a group with
+  // no owner has nobody who can invite. Passing the role on is what makes leaving possible without
+  // leaving the group ownerless. Bots are deliberately not candidates: `role` decides who may
+  // invite, and an endpoint's owner would then hold that power on the machine's behalf.
+  //
+  // `undefined` means nobody is left, which is the last person leaving — deleting the group, not
+  // this.
+  const handOverOwner = (workgroupId, leavingMembershipId) => {
+    const next = stmt(`SELECT * FROM memberships
+      WHERE workgroup_id = ? AND status = 'active' AND member_type = 'user' AND id != ?
+      ORDER BY joined_at ASC`).get(workgroupId, leavingMembershipId)
+    if (next === undefined) return undefined
+    stmt("UPDATE memberships SET role = 'owner' WHERE id = ?").run(next.id)
+    return next
+  }
+
   const text = (value, field, max) => {
     if (typeof value !== 'string') throw badRequest('workgroup/invalid-field', `${field} must be text.`)
     const trimmed = value.trim()
@@ -478,11 +496,42 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
       const self = (row.member_type === 'user' && row.user_id === userId)
         || (row.member_type === 'botEndpoint' && stmt('SELECT owner_id FROM bot_endpoints WHERE id = ?').get(row.endpoint_id)?.owner_id === userId)
       if (!self && mine.role !== 'owner' && mine.role !== 'admin') throw forbidden('workgroup/not-admin', 'Only the group owner or an admin may remove someone else.')
-      if (row.role === 'owner') throw conflict('workgroup/owner-cannot-leave', 'The group owner cannot leave the group.')
+      // The owner may now leave, handing the role to the next person, instead of being locked in.
+      // Nobody else is left → the group has one member and nobody to lead it, which is the dissolve
+      // case; refusing here keeps a group from becoming ownerless by accident.
+      if (row.role === 'owner') {
+        const heir = handOverOwner(workgroupId, row.id)
+        if (heir === undefined) {
+          throw conflict('workgroup/last-member', 'You are the last person in this group. Delete the group instead of leaving it.')
+        }
+        audit.record({ actorId: userId, deviceId, action: 'workgroup.owner-handover', targetId: heir.id, result: row.id })
+      }
 
       stmt("UPDATE memberships SET status = 'left' WHERE id = ?").run(row.id)
       audit.record({ actorId: userId, deviceId, action: 'workgroup.member-remove', targetId: row.id, result: 'ok' })
       return { membershipId: row.id, status: 'left' }
+    },
+
+    // ── DELETE /v1/workgroups/:id ────────────────────────────────────────────────────
+    // The owner dissolves the group for EVERYONE. `discard` above only withdraws a group that never
+    // held a message (it exists for a failed upgrade), so it cannot serve this: a real group has
+    // messages by definition.
+    //
+    // Why this is needed at all: the client's 「删除工作群」 removed the local room and told the Hub
+    // nothing, so the next start listed the group again and re-adopted it — the reported 「删除工作群，
+    // 采取本应用后又出现了」. A local group never came back because it exists only on that machine.
+    // Leaving instead of deleting would also have worked for that symptom, but the group would live
+    // on in the Hub's list for every other member, which is not what deleting a group means.
+    //
+    // Memberships, events, invites, cursors, attachments, tasks and artifacts all carry
+    // `REFERENCES workgroups(id) ON DELETE CASCADE`, and `PRAGMA foreign_keys = ON` is set, so this
+    // one statement is the whole removal.
+    async dissolve({ userId, deviceId, workgroupId }) {
+      const { group, membership } = requireMember(workgroupId, userId)
+      if (membership.role !== 'owner') throw forbidden('workgroup/not-owner', 'Only the group owner may delete the group.')
+      db.prepare('DELETE FROM workgroups WHERE id = ?').run(workgroupId)
+      audit.record({ actorId: userId, deviceId, action: 'workgroup.dissolve', targetId: workgroupId, result: group.name })
+      return { workgroupId, deleted: true }
     },
 
     // ── POST /v1/workgroups/:id/read ─────────────────────────────────────────────────

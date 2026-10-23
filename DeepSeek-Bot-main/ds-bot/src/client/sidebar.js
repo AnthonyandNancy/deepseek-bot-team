@@ -349,7 +349,10 @@ export function TeamSidebar(props) {
         : entry.kind === 'room'
           ? h(RoomRow, { key: entry.item.id, ...rowProps, room: entry.item, marked: markedUnread[entry.item.id] === true })
           : entry.kind === 'workgroup'
-            ? h(WorkgroupRow, { key: entry.item.id, room: entry.item, roster, actions: rowActions, wide })
+            // The row needs the same "am I the one on screen" source and the same unread marking a
+            // local group row gets. `rowProps` carries both; building this call by hand left them
+            // out, which is why a selected workgroup drew exactly like an unselected one.
+            ? h(WorkgroupRow, { key: entry.item.id, ...rowProps, room: entry.item, marked: markedUnread[entry.item.id] === true })
           : h(AgentRow, { key: entry.item.id, ...rowProps, agent: entry.item, marked: markedUnread[entry.item.id] === true })))))
 }
 
