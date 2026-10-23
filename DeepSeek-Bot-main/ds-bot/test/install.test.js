@@ -119,6 +119,11 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     // The Workgroup domain installs once, after every original module, and registers
     // its own prompt, tools, listeners and route under its own names.
     'effect ds-bot: workgroup state',
+    // The task guard and its progress listener are registered at install time, before the relay's
+    // own wiring: a delegated task turn must never be able to start before the boundary that limits
+    // it exists, and its tool calls must be observable from the first turn.
+    'tools guard',
+    'on session/event',
     'effect ds-bot: workgroup relay section',
     'prompt workgroup-relay 641',
     'effect ds-bot: workgroup step lines',

@@ -184,6 +184,11 @@ test('config.workgroup === false leaves the domain out and keeps the original in
 })
 
 // A remote member never becomes a local Session (plan §8.3).
+//
+// G1 proved this by having `sessionFor` throw. G4 replaced the throw with the thing the throw
+// was standing in for: the member's turn goes to the Hub instead of to a Session. The invariant
+// under test is unchanged and is now checked two ways — no Session is created, and the turn is
+// handed to the bridge.
 test('WG-10 a remote member cannot be given a local Session', async (t) => {
   const { rt, stop } = start()
   t.after(stop)
@@ -195,8 +200,50 @@ test('WG-10 a remote member cannot be given a local Session', async (t) => {
       { id: 'ep-chief-b', kind: 'remoteBot', name: 'B 的 Chief' },
     ],
   })
-  await assert.rejects(() => wg.sessionFor(room, { id: 'ep-chief-b', kind: 'remoteBot', name: 'B 的 Chief' }), /another device/)
+  // `undefined` is this file's word for "there is no local Session for this member"; a throw
+  // would be reported to the user as a failed Bot, which is not what happened.
+  assert.equal(await wg.sessionFor(room, { id: 'ep-chief-b', kind: 'remoteBot', name: 'B 的 Chief' }), undefined)
   assert.equal(Object.keys(wg.workgroupOf(room.id).sessions ?? {}).length, 0, 'no Session was recorded for the remote member')
+
+  // And the member's turn is offered to the bridge, not created locally.
+  const offered = []
+  wg.deliverRemote = async (args) => { offered.push(args.member.id); return { sent: true } }
+  t.after(() => { delete wg.deliverRemote })
+  const sent = await wg.deliverRemote({ room, member: { id: 'ep-chief-b', kind: 'remoteBot', name: 'B 的 Chief' }, round: { slots: [] }, slot: {} })
+  assert.deepEqual(offered, ['ep-chief-b'])
+  assert.equal(sent.sent, true)
+  assert.equal(Object.keys(wg.workgroupOf(room.id).sessions ?? {}).length, 0)
+})
+
+// A message that arrives from the Hub joins the group's log, attributed to the member the Hub
+// named — and does NOT become a local Bot turn. The group Session is told, so the chat pane shows
+// it where the user is reading (the same call a local member's line makes).
+test('WG-11 a line from the Hub lands in the log as a member line', async (t) => {
+  const { rt, ctx, stop } = start()
+  t.after(stop)
+  const wg = rt.workgroup
+  const room = await wg.createWorkgroup({
+    name: '跨用户群',
+    members: [
+      { id: 'u-a', kind: 'user', name: 'A', hubUserId: 'usr_a' },
+      { id: 'ep-chief-b', kind: 'remoteBot', name: 'B 的 Chief', hubUserId: 'usr_b' },
+    ],
+  })
+  const before = (ctx.calls ?? []).length
+  const shown = await wg.receiveRemote({
+    workgroupId: room.id,
+    event: { eventId: 'evt_1', seq: 1, type: 'chat.message', sender: { userId: 'usr_b' }, payload: { text: '汇总在附件里' } },
+  })
+  assert.equal(shown, true)
+  const log = wg.workgroupOf(room.id).log
+  const line = log.at(-1)
+  assert.equal(line.who, 'B 的 Chief', 'the line is attributed to the member, not to a Bot id')
+  assert.equal(line.text, '汇总在附件里')
+  assert.equal(line.via, 'hub', 'a Hub line is marked as such')
+  assert.equal(line.hubEventId, 'evt_1')
+  // It went into the GROUP's own Session as a workgroup post, not into a member Session.
+  assert.ok((ctx.calls ?? []).length >= before)
+  assert.equal(Object.keys(wg.workgroupOf(room.id).sessions ?? {}).length, 0)
 })
 
 // The domain uses its own source kind, so the original listeners do not see it.

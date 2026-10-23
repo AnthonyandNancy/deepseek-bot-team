@@ -13,9 +13,13 @@
 //   6. the room's member list is Workgroup members, not just local Bots, and a
 //      remote member never becomes a local Session (plan §8.3).
 //
-// G1 scope: room log, rounds, @mentions, relay and stop, all against LOCAL test
-// messages only. No Hub, no bridge, no cross-user delivery — `deliver` below refuses
-// a remote target until the bridge exists in G4.
+// G1 scope was the room log, rounds, @mentions, relay and stop against LOCAL messages
+// only. G4 adds the one seam that was left for it: a member whose `kind` is not
+// `localBot` is a real person (or their Bot) on ANOTHER device. Such a member is never
+// given a local Session — that would be the "fake remote DSH Session" plan §8.3 forbids —
+// and its turn is handed to `wg.deliverRemote` (host/bridge.js), which puts it on the Hub.
+// A line that arrives from the Hub comes back in through `wg.receiveRemote` and is posted
+// into the same log as a local member's line, so the chat pane needs one code path.
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { readFile, rm } from 'node:fs/promises'
@@ -272,7 +276,12 @@ export function install(wg) {
   }
   wg.retitleWorkgroup = retitleWorkgroup
 
-  async function createWorkgroup({ name, members = [], adminId, notice = '' } = {}) {
+  // `hubWorkgroupId` is set by host/bridge.js when the group was created on the Hub. Such a group
+  // is a *linked* one: its membership is decided by the Hub, and the local member list is a
+  // projection that arrives with the first sync. It is therefore the one case where the local
+  // "a group needs at least two members" rule does not apply — that rule exists so a local group
+  // never has nobody to answer, and a Hub group's answerers are on other machines by design.
+  async function createWorkgroup({ name, members = [], adminId, notice = '', hubWorkgroupId } = {}) {
     // The file must be read before anything is written on top of it, or a first-run
     // create would overwrite a state file written by an earlier process.
     await wg.load()
@@ -296,7 +305,7 @@ export function install(wg) {
     const createdAt = Date.now()
     // COPY OF THE ORIGINAL (`createRoom`, src/host/roster.js:323): the member list is
     // checked BEFORE anything is created, so a refused create leaves no Session behind.
-    checkMembers(unique)
+    if (hubWorkgroupId === undefined) checkMembers(unique)
     const title = custom !== '' ? custom : autoWorkgroupName(unique, createdAt)
     // COPY OF THE ORIGINAL (`buildRoom`): a group is a Session — `const id = await
     // createSession(title)` — which is exactly what lets the sidebar open it with
@@ -312,6 +321,10 @@ export function install(wg) {
       adminId: adminId ?? unique[0]?.id ?? null,
       mode: 'admin',
       createdAt,
+      // The Hub's own id for this group, when the group lives on a Hub. Absent for a group that
+      // exists only on this machine. It is a plain field of the record: the routing it enables
+      // (`roomOfHubGroup`) is a lookup, never a second source of truth for membership.
+      ...(hubWorkgroupId === undefined ? {} : { hubWorkgroupId }),
       seq: 0,
       log: [],
       seen: {},
@@ -333,6 +346,120 @@ export function install(wg) {
     return room
   }
   wg.createWorkgroup = createWorkgroup
+
+  // The local room for a Hub group, if this machine has one. Scanned rather than indexed: there are
+  // at most a few dozen workgroups, and a second index could drift from the records it indexes.
+  const roomOfHubGroup = (hubWorkgroupId) => {
+    if (hubWorkgroupId === undefined) return undefined
+    for (const room of Object.values(wg.state?.workgroups ?? {})) {
+      if (room?.hubWorkgroupId === hubWorkgroupId) return room
+    }
+    return undefined
+  }
+  wg.roomOfHubGroup = roomOfHubGroup
+
+  // Idempotent: the room for a Hub group, created the first time it is needed. Called when this
+  // machine creates a group on the Hub and when an event arrives for a group it has just joined,
+  // so the chat pane always has a room to open. `name` and `notice` come from the Hub, so the two
+  // machines show the same title.
+  async function ensureLinkedGroup({ hubWorkgroupId, name, notice = '' }) {
+    await wg.load()
+    const known = roomOfHubGroup(hubWorkgroupId)
+    if (known !== undefined) {
+      // The Hub is authoritative for the group's settings: a rename on one machine must not leave
+      // another machine showing the old title.
+      let changed = false
+      if (typeof name === 'string' && name !== '' && known.name !== name) {
+        known.name = name.slice(0, 60)
+        changed = true
+      }
+      if (typeof notice === 'string' && known.notice !== notice) {
+        known.notice = notice
+        changed = true
+      }
+      if (changed) {
+        await retitleWorkgroup(known)
+        await wg.save()
+      }
+      return known
+    }
+    // A linked group starts with no local member records: the Hub owns the roster, and the first
+    // sync fills the log. A local admin id would be a lie — `adminId` is what decides who may
+    // rename a LOCAL group.
+    return createWorkgroup({ name: name ?? '', notice, hubWorkgroupId })
+  }
+  wg.ensureLinkedGroup = ensureLinkedGroup
+
+  // The Hub's roster, written into the local room's `members`.
+  //
+  // Two things need it. A line that arrives from another machine carries the Hub's user id, and
+  // without a matching member the log can only say "A member". And a Hub group's member list is
+  // decided on the Hub — a person who joined on another device, or an endpoint its owner published,
+  // is not somebody this machine picked in a composer.
+  //
+  // The shape is this domain's own member record (`{id, kind, name, hubUserId}`), because that is
+  // what `sessionFor`, `mentionsIn` and the panel already read. A Hub *person* is `kind: 'user'`:
+  // there is no local Session for another human, and inventing one would be the fake remote Session
+  // plan §8.3 forbids. A Hub *Bot endpoint* is `kind: 'remoteBot'`, with the endpoint id as `id`.
+  //
+  // `adminId` follows the Hub's owner, so a group renamed on one machine and an admin-only round on
+  // another agree about who leads.
+  async function applyRoster({ hubWorkgroupId, members: hubMembers }) {
+    if (hubWorkgroupId === undefined) return undefined
+    await wg.load()
+    const room = roomOfHubGroup(hubWorkgroupId)
+    if (room === undefined) return undefined
+    const roster = Array.isArray(hubMembers) ? hubMembers : undefined
+    if (roster === undefined) return room
+
+    const next = roster.map((member) => {
+      // A Bot endpoint publishes a name, so it has one. A person's account carries no display name in
+      // this Hub — the only thing it exposes is a masked phone number — so that is what a member row
+      // shows. It is a real limit of the account model (`users` has no `display_name`), not a
+      // missing lookup, and inventing one locally would show two machines different names.
+      const name = member.memberType === 'botEndpoint'
+        ? (member.name ?? member.endpointName ?? member.endpointId)
+        : (member.phoneMasked ?? member.name ?? 'A member')
+      return {
+        id: member.memberType === 'botEndpoint' ? member.endpointId : member.userId,
+        kind: member.memberType === 'botEndpoint' ? 'remoteBot' : 'user',
+        name,
+        // Which Hub user this member is, so an incoming event's `sender.userId` can be matched to a
+        // name without a second lookup.
+        hubUserId: member.userId ?? undefined,
+        ...(member.memberType === 'botEndpoint' ? { endpointId: member.endpointId } : {}),
+        role: member.role,
+        membershipId: member.membershipId,
+      }
+    }).filter(member => member.id !== undefined && member.id !== null)
+
+    const owner = roster.find(member => member.role === 'owner')
+    const adminId = owner === undefined
+      ? (room.adminId ?? null)
+      : (owner.memberType === 'botEndpoint' ? owner.endpointId : owner.userId)
+
+    const same = (room.members ?? []).length === next.length
+      && (room.members ?? []).every((member, index) => member.id === next[index]?.id && member.name === next[index]?.name)
+      && room.adminId === adminId
+    // Written only when it changed: every event would otherwise touch state.json, and a group with
+    // traffic would rewrite the file on each message.
+    if (same) return room
+    room.members = next
+    room.adminId = adminId
+    await wg.save()
+    return room
+  }
+  wg.applyRoster = applyRoster
+
+  // Merges the Hub's roster into a local room without needing the full payload: used after a create
+  // and after an invite, where the caller has only an id.
+  async function syncRoster({ hubWorkgroupId }) {
+    if (hubWorkgroupId === undefined) return undefined
+    const answer = await wg.hub?.workgroup?.(hubWorkgroupId).catch(() => undefined)
+    if (answer === undefined || Array.isArray(answer.members) === false) return undefined
+    return applyRoster({ hubWorkgroupId, members: answer.members })
+  }
+  wg.syncRoster = syncRoster
 
   // Rename, notice, admin and membership changes. The original does this in
   // roster.js's planRoomChange/updateRoom; here it is one small function because a
@@ -584,8 +711,11 @@ export function install(wg) {
       await rt.ensureCapabilities(known)
       return { id: known, brief: undefined }
     }
-    // A remote member speaks through the Hub, not a local Session (plan §8.3).
-    if (member.kind !== 'localBot') throw new Error(`${member.name} works on another device; a workgroup Session cannot stand in for it`)
+    // A remote member speaks through the Hub, not a local Session (plan §8.3). Returning
+    // `undefined` — rather than throwing — is what "there is no local Session for this member"
+    // means everywhere else in this file, and it is what lets `runRound` hand the turn to the
+    // bridge instead of reporting a failed Bot to the user.
+    if (member.kind !== 'localBot') return undefined
     // The BOT a member stands for. A local group's `member` IS the Bot's id, so the
     // original hands `member` straight to the five steps below; a Workgroup member is an
     // identity record (`{id, kind, name}`), and handing THAT to them would read
@@ -627,14 +757,28 @@ export function install(wg) {
   // Deliver a member's turn into its own workgroup Session. `wg.deliver` is the one
   // seam the remote bridge replaces in G4; it is a separate function so the
   // original rt.deliver (already wrapped by ../../host/resume.js) is never touched.
-  async function deliver({ sessionId, text, exchangeId, roomId, note, files }) {
+  async function deliver({ sessionId, text, exchangeId, role = 'room', roomId, note, taskId, senderName = 'You', files }) {
     const agent = await rt.resolveAgent(sessionId)
     if (agent === undefined) throw new Error(`ds-bot: no Session ${sessionId} for this workgroup`)
     const message = createUserMessage({
       // A file posted in the group travels with the line it belongs to, as a file block
       // DSH turns into a read-only path the member's tools can read.
       content: [{ type: 'text', text }, ...(files ?? []).map(attachment => ({ type: 'file', attachment }))],
-      source: { kind: WG_SOURCE_KIND, form: 'relay', role: 'room', exchangeId, roomId, note, senderName: 'You' },
+      // `role` is a PARAMETER because the original's is (src/host/delivery.js:48 takes `role`), and
+      // this copy had it hard-coded to 'room'. That made the seam usable for exactly one kind of
+      // message: a group round. A delegated task is the same delivery with `role: 'task'`, and the
+      // workgroup turn machinery already ignores any role other than room/post/kickoff, so a task
+      // Session's line starts no round (groups.js:1462, :1931, :2063).
+      source: {
+        kind: WG_SOURCE_KIND,
+        form: 'relay',
+        role,
+        exchangeId,
+        ...(roomId === undefined ? {} : { roomId }),
+        ...(note === undefined ? {} : { note }),
+        ...(taskId === undefined ? {} : { taskId }),
+        senderName,
+      },
     })
     if (typeof agent.followup === 'function') agent.followup(message)
     else await ctx.sessionController.prompt({ sessionId, mode: 'queue', content: message.content, source: message.source })
@@ -665,6 +809,75 @@ export function install(wg) {
     await ctx.sessions?.flush?.(agent.session)
   }
   wg.postToGroupSession = postToGroupSession
+
+  // A message that came from another device, in through the bridge (host/bridge.js).
+  //
+  // Three things happen, in the order the local path does them:
+  //   1. the line joins this group's log, attributed to the member the Hub named;
+  //   2. it is posted into the group's own Session, so the group chat shows it where the user
+  //      is reading (`postToGroupSession`, the same call a local member's line makes);
+  //   3. the group is saved.
+  //
+  // The sender is never resolved to a local Bot: a remote line is another person's, and
+  // `senderSessionId` is left to the member id the Hub assigned so the avatar and the name
+  // are the ones the member list already shows.
+  async function receiveRemote({ workgroupId, event }) {
+    await wg.load()
+    const room = roomOfHubGroup(workgroupId) ?? wg.workgroupOf(workgroupId)
+    if (room === undefined) return false
+    // Durability of the dedup: the bridge's in-memory set of seen ids dies with the process, but the
+    // log's own `hubEventId` does not. A replay after a restart therefore lands on a room that
+    // already has this event and is refused here, which is what makes "at least once" invisible.
+    if (event?.eventId !== undefined && (room.log ?? []).some(line => line.hubEventId === event.eventId)) return false
+    const payload = event?.payload ?? {}
+    const text = typeof payload.text === 'string' ? payload.text : ''
+    const files = Array.isArray(payload.attachments) ? payload.attachments : []
+    if (text === '' && files.length === 0) return false
+
+    // Who said it. The Hub's sender is a Hub user; the member list carries the same id on the
+    // member record, so the name in the log is the one the group already shows.
+    const senderId = event?.sender?.userId
+    const member = (room.members ?? []).find(other => other.hubUserId === senderId || other.id === senderId)
+    // A Hub endpoint may speak as itself; the payload's own name is the next best answer because the
+    // sender published it. "A member" is the last resort, and it is a bug when it shows: the roster
+    // sync (`applyRoster`) is what normally prevents it.
+    const name = member?.name ?? payload.senderName ?? payload.endpointName ?? 'A member'
+    const memberId = member?.id ?? senderId ?? 'remote'
+
+    appendLine(room, {
+      who: name,
+      memberId,
+      text: files.length === 0 ? text : text === '' ? `[${files.map(file => file.name).join(', ')}]` : `${text}
+[${files.map(file => file.name).join(', ')}]`,
+      // Marked so the UI and a later phase can tell a line that crossed the Hub from one this
+      // machine produced. It is a display fact, not a permission.
+      via: 'hub',
+      hubEventId: event.eventId,
+      hubSeq: event.seq,
+      // The files travel with the line so a reader can fetch them later. Only the metadata the Hub
+      // handed out — an id, a name, a size, a mime, a hash — never a location.
+      ...(files.length === 0 ? {} : {
+        attachments: files.map(file => ({
+          attachmentId: file.attachmentId,
+          name: file.name,
+          mime: file.mime,
+          size: file.size,
+          sha256: file.sha256,
+        })),
+      }),
+    })
+    // A line from the Hub stays out of the group's own Session, and that is deliberate.
+    //
+    // `postToGroupSession` writes a `role: 'post'` workgroup message, which the relay hook consumes
+    // to start a round — that is exactly right for a LOCAL member, whose words this machine's model
+    // produced. For a line that already came from another machine over the Hub it would start a
+    // second round here, which is the same conversation answered twice by two machines. The log is
+    // the record; the round is what turns a message into work, and only the machine the message was
+    // sent from should start one.
+    await wg.save()
+    return true
+  }
+  wg.receiveRemote = receiveRemote
 
   // THE USER'S OWN MESSAGE INTO A WORKGROUP, the original way.
   //
@@ -1086,6 +1299,49 @@ export function install(wg) {
     return round.slots.length - before
   }
 
+  // ── the coordinator lease (plan §9.5) ───────────────────────────────────────────
+  //
+  // V1 allows ONE scheduler per Hub group. This is where that becomes true rather than aspirational:
+  // an automatic round asks for the lease first, and a group whose lease is held elsewhere does not
+  // start one. Human chat is untouched — `send-hub` never consults the lease — which is what §9.5
+  // means by "其离线时普通真人聊天继续，自动 Bot 轮次暂停".
+  //
+  // Two outcomes are not failures:
+  //   * a local group has no Hub, so there is nothing to coordinate;
+  //   * the socket is down, so the Hub cannot be asked. The round proceeds, because a team with no
+  //     Hub must behave exactly as it did before G5 (gate N2's neighbour: "local still works").
+  async function holdLeaseFor(room) {
+    const workgroupId = room.hubWorkgroupId
+    if (workgroupId === undefined) return { held: true, local: true }
+    if (wg.bridge?.status?.().connected !== true) return { held: true, offline: true }
+    try {
+      const answer = await wg.bridge.acquireLease({ workgroupId }).catch(error => ({ error }))
+      if (answer?.error !== undefined) {
+        // Held by somebody else: this machine must not run a second round. The person is told, once,
+        // through the round's own reporting rather than a toast they cannot act on.
+        const message = answer.error?.message ?? String(answer.error)
+        rt.warn('ds-bot: no workgroup round in %s: %s', room.name, message)
+        appendLine(room, { who: 'System', kind: 'failed', text: message })
+        await wg.save().catch(() => {})
+        return { held: false, reason: message }
+      }
+      return { held: true, lease: answer?.lease }
+    } catch (error) {
+      // A refusal the bridge itself produced (no account, say) is not a reason to stop a local round.
+      rt.warn('ds-bot: the lease for %s was not acquired: %s', room.name, error?.message ?? error)
+      return { held: true, degraded: true }
+    }
+  }
+
+  // Released when the round ends, so the next round does not wait for an expiry. Best effort: a
+  // failed release only costs the group one lease duration.
+  async function releaseLeaseFor(room) {
+    const workgroupId = room.hubWorkgroupId
+    if (workgroupId === undefined) return
+    if (wg.bridge?.status?.().connected !== true) return
+    await wg.bridge.releaseLease({ workgroupId })
+  }
+
   // COPY OF THE ORIGINAL (`runRound`, src/host/groups.js:410): the turn loop with its own
   // budget, the per-member call cap, and the "@Name" expansion after each member speaks.
   // The earlier version walked `round.slots` once, so a member could never be called again
@@ -1113,6 +1369,34 @@ export function install(wg) {
       round.speaking = member.id
       round.turns = (round.turns ?? 0) + 1
       turns.set(member.id, (turns.get(member.id) ?? 0) + 1)
+      // A remote member is a person (or a Bot) on another device. Their turn is not a model
+      // call this machine can make: it is a message on the Hub, and the answer — if any —
+      // arrives later as an event. The round therefore does not wait for it, exactly as it
+      // does not wait for a member who went quiet.
+      //
+      // Without the bridge (signed out), the member is reported as skipped rather than as a
+      // failed Bot: nothing is broken, the Hub is simply not there.
+      if (member.kind !== 'localBot') {
+        const delivered = await Promise.resolve()
+          .then(() => wg.deliverRemote?.({ room, member, round, slot }))
+          .catch(error => ({ error }))
+        if (delivered?.error !== undefined) {
+          rt.warn('ds-bot: workgroup line for remote member %s not sent: %s', member.name, delivered.error?.message ?? delivered.error)
+          slot.status = 'failed'
+          round.failed.push(member.name)
+          round.replies.push({
+            kind: 'failed', botId: member.id, name: member.name, code: 'HUB',
+            text: String(delivered.error?.message ?? delivered.error).slice(0, 300), time: Date.now(),
+          })
+        } else if (delivered?.queued === true || delivered?.sent === true) {
+          slot.status = 'remote'
+        } else {
+          // No bridge: the member is on another device and this machine cannot reach it.
+          slot.status = 'remote'
+        }
+        round.speaking = null
+        continue
+      }
       let session
       try {
         session = await sessionFor(room, member)
@@ -1497,12 +1781,27 @@ export function install(wg) {
       }
       if (posts.some(post => post.resumed || post.stopped || post.done)) await wg.save()
       wg.roomProgress.set(exec.callId, round)
+      // THE COORDINATOR FENCE (plan §9.5).
+      //
+      // A Hub group may only run an automatic round while this device holds the group's lease, and
+      // the round's own id is what a late report is checked against. A local group (`hubWorkgroupId`
+      // undefined) is unaffected: it has no Hub, no second coordinator, and no fence to apply.
+      //
+      // The failure is reported rather than thrown: a round that cannot be coordinated must leave the
+      // group usable for human chat, which is exactly what §9.5 asks for.
+      const fencing = await holdLeaseFor(room)
+      if (fencing.held === false) {
+        wg.roomProgress.delete(exec.callId)
+        exec.concludeTurn?.()
+        return
+      }
       try {
         await runRound(room, round, exec.signal ?? new AbortController().signal)
       } catch (error) {
         rt.warn('ds-bot: workgroup round in %s stopped: %s', room.name, error)
       } finally {
         wg.roomProgress.delete(exec.callId)
+        await releaseLeaseFor(room).catch(() => {})
       }
       // COPY OF THE ORIGINAL (`groups.js:572-575`): a poster that asked to be reported to
       // gets one message when the round ends.

@@ -79,6 +79,13 @@ export function install(wg) {
       ...(typeof input.deviceId === 'string' ? { deviceId: input.deviceId } : {}),
       allowedResources: [...allowedResources],
       ...(Array.isArray(input.capabilities) ? { capabilities: [...input.capabilities] } : {}),
+      // The folder B approved, and the folder every later run of this task must stay inside.
+      // Both are recorded by `decide` after `realpath`, so a symlink or a `..` cannot creep in
+      // between the approval and the run. They are HERE, in the allow-list, because this function
+      // drops anything it does not name: a caller that passed a root the shape did not carry would
+      // get a grant that silently checked nothing.
+      ...(typeof input.workDir === 'string' && input.workDir !== '' ? { workDir: input.workDir } : {}),
+      ...(typeof input.workDirRoot === 'string' && input.workDirRoot !== '' ? { workDirRoot: input.workDirRoot } : {}),
       expiresAt: input.expiresAt,
     }
   }

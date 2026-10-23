@@ -10,15 +10,16 @@ import { HubError, notFound } from './errors.js'
 import { isLoopback } from './config.js'
 
 // Enough for a public key and a password; small enough that a body cannot be used to make
-// the Hub allocate.
+// the Hub allocate. A route may raise it (`maxBodyBytes`), which exactly one does: an attachment
+// upload, where the body IS the file.
 export const MAX_BODY_BYTES = 64 * 1024
 
-const readBody = (req) => new Promise((resolve, reject) => {
+const readBody = (req, limit) => new Promise((resolve, reject) => {
   const chunks = []
   let size = 0
   req.on('data', (chunk) => {
     size += chunk.length
-    if (size > MAX_BODY_BYTES) {
+    if (size > limit) {
       reject(new HubError(413, 'hub/body-too-large', 'The request body is too large.'))
       req.destroy()
       return
@@ -74,7 +75,9 @@ export function createHttpHandler({ router, logger, allowInsecureLoopbackOnly, n
       if (route === undefined) throw notFound('hub/not-found', 'No such endpoint.')
       if (route.methodMismatch === true) throw new HubError(405, 'hub/method-not-allowed', `${req.method} is not allowed on ${path}.`)
 
-      const raw = req.method === 'GET' || req.method === 'HEAD' ? '' : await readBody(req)
+      const raw = req.method === 'GET' || req.method === 'HEAD'
+        ? ''
+        : await readBody(req, route.maxBodyBytes ?? MAX_BODY_BYTES)
       const body = parseJson(raw)
       const result = await route.handler({
         params: route.params,
@@ -83,7 +86,11 @@ export function createHttpHandler({ router, logger, allowInsecureLoopbackOnly, n
         ip,
         headers: req.headers,
       })
-      finish(result === undefined ? json(204, null) : result.status === undefined ? json(200, result) : result)
+      // A handler returns either a plain value (→ 200 JSON) or the object `json`/`created`/`bytes`
+      // built. The discriminator is a *numeric* `status`: a result that merely has a string field
+      // called `status` — an invite's `accepted`, a member's `left` — is a body, not a status code.
+      const shaped = result !== undefined && typeof result.status === 'number' && 'body' in result
+      finish(result === undefined ? json(204, null) : shaped ? result : json(200, result))
     } catch (error) {
       if (error instanceof HubError) {
         finish({ status: error.status, headers: { 'content-type': 'application/json; charset=utf-8', ...error.headers }, body: JSON.stringify({ error: { code: error.code, message: error.message } }) })
@@ -103,5 +110,14 @@ export function createHttpHandler({ router, logger, allowInsecureLoopbackOnly, n
 // say so explicitly rather than the HTTP layer guessing from the body's shape.
 export const created = value => json(201, value)
 export const noContent = () => json(204, null)
+
+// A byte response: the attachment download. Returned rather than streamed because the size is
+// already bounded by the upload cap, and one buffered response is simpler to be correct about
+// than a stream that must also be closed on the error paths.
+export const bytes = (data, headers = {}) => ({
+  status: 200,
+  headers: { 'content-type': 'application/octet-stream', ...headers },
+  body: data,
+})
 
 export { json }

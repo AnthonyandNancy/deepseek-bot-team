@@ -8,6 +8,8 @@ import { useEscape } from './overlay-hooks.js'
 import { BotSettingsForm } from './bot-settings.js'
 import { Segmented, useGlide } from './motion.js'
 import { GroupSettingsForm, NewGroupForm } from './group-settings.js'
+// The workgroup domain's copy, for a workgroup id only; a local group keeps the original form.
+import { GroupSettingsForm as WorkgroupGroupSettingsForm } from '../workgroup/client/group-settings.js'
 import { CreateBot } from './create-bot.js'
 import { KeyIcon, SecretsPage } from './secret-card.js'
 import { UsagePage } from './usage-page.js'
@@ -243,7 +245,9 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
           shown === 'models' ? h(ProvidersPage, { actions, run, Section: SetSection }) : null,
           bot ? h('div', { className: 'bt-settings-form' }, h(BotSettingsForm, { key: bot.id, bot, roster, actions, run })) : null,
           shown === 'bots' && !bot ? h(BotsPage, { roster, actions, run }) : null,
-          room ? h('div', { className: 'bt-settings-form' }, h(GroupSettingsForm, { key: room.id, room, roster, actions, run })) : null,
+          room ? h('div', { className: 'bt-settings-form' }, room.workgroup === true
+            ? h(WorkgroupGroupSettingsForm, { key: room.id, room, roster, actions, run })
+            : h(GroupSettingsForm, { key: room.id, room, roster, actions, run })) : null,
           shown === 'groups' && !room ? h(GroupsPage, { roster, actions, run }) : null,
           shown === 'connectors' ? h(ConnectorsPage, { roster, actions }) : null,
           shown === 'capabilities' ? h(CapabilitiesPage, { roster, actions, run }) : null,

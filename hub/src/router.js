@@ -30,10 +30,14 @@ const normalizePath = (path) => {
 
 export function createRouter() {
   const routes = []
-  const add = (method, pattern, handler) => { routes.push({ method, ...compile(pattern), handler }) }
+  // `options` is per-route tuning. Today it carries one thing: `maxBodyBytes`, because an
+  // attachment upload is the only endpoint whose body is not a small JSON document.
+  const add = (method, pattern, handler, options = {}) => {
+    routes.push({ method, ...compile(pattern), handler, ...options })
+  }
   return {
-    get: (pattern, handler) => add('GET', pattern, handler),
-    post: (pattern, handler) => add('POST', pattern, handler),
+    get: (pattern, handler, options) => add('GET', pattern, handler, options),
+    post: (pattern, handler, options) => add('POST', pattern, handler, options),
     // Returns `{ handler, params }`, or `{ methodMismatch: true }` when the path exists under
     // another method, or undefined for a genuine 404.
     resolve(method, path) {
@@ -44,7 +48,9 @@ export function createRouter() {
         if (params === undefined) continue
         pathMatched = true
         // HEAD follows GET, as it does everywhere; the response body is dropped by the caller.
-        if (route.method === method || (method === 'HEAD' && route.method === 'GET')) return { handler: route.handler, params }
+        if (route.method === method || (method === 'HEAD' && route.method === 'GET')) {
+          return { handler: route.handler, params, maxBodyBytes: route.maxBodyBytes }
+        }
       }
       return pathMatched ? { methodMismatch: true } : undefined
     },

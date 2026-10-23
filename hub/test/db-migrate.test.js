@@ -75,9 +75,25 @@ test('the G3 tables exist and the deliberately absent one does not', (t) => {
   // No SMS in V1 means no OTP table. Creating one would invite a future implementer to build
   // the flow without the gateway the gate requires.
   assert.equal(names.includes('otp_challenges'), false, 'otp_challenges must not exist')
-  // Section 12's remaining tables are G4's work; an empty one would read as "already done".
-  assert.equal(names.includes('workgroups'), false)
-  assert.equal(names.includes('events'), false)
+})
+
+test('the G4 and G5 tables exist and the G6 one does not', (t) => {
+  const { db } = withDatabase(t)
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(row => row.name)
+
+  for (const table of [
+    'bot_endpoints', 'workgroups', 'memberships', 'invites', 'events',
+    'deliveries', 'read_cursors', 'attachments', 'attachment_tickets',
+    // G5 (migration 4). This list moved when G5 landed: the schema test for a phase asserts what
+    // that phase added, and the previous phase's "must not exist yet" line is replaced rather than
+    // left behind to fail.
+    'tasks', 'approvals', 'round_leases', 'artifacts',
+  ]) {
+    assert.ok(names.includes(table), `${table} should exist`)
+  }
+  // G6 (group memories) is still out of scope. A table nothing writes to would read as "already
+  // done" to whoever picks up the next phase.
+  assert.equal(names.includes('group_memories'), false, 'group_memories belongs to G6')
 })
 
 test('a phone number and a device key are each unique where they must be', (t) => {

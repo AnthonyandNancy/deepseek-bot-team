@@ -24,3 +24,4 @@ node_modules/
 /docker/.env
 /.env
 /docker-compose.override.yml
+test*/

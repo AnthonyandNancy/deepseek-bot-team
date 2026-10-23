@@ -46,6 +46,14 @@ export function fakeContext({ services = {} } = {}) {
         if (listener.length < 2) listener(payload)
       }
     },
+    // Calls the listeners of an event that take BOTH arguments, which is how DSH delivers
+    // `session/event` (`(session, event)`). `emit` above cannot reach those, so a test that wants to
+    // drive a turn signal needs this one.
+    emitBoth(name, ...args) {
+      for (const listener of listeners.get(name) ?? []) {
+        if (listener.length >= 2) listener(...args)
+      }
+    },
     effect(execute, label) {
       calls.push(`effect ${label}`)
       const dispose = execute()

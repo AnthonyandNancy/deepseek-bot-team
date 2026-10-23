@@ -185,7 +185,7 @@ test('the hub greets a good handshake as the session\'s own user', async (t) => 
   conn.ws.close()
 })
 
-test('a business message is answered as unsupported rather than ignored', async (t) => {
+test('a frame the hub cannot act on is answered rather than ignored', async (t) => {
   const hub = await startHub()
   t.after(() => hub.close())
   const { created, device } = await signedIn(hub)
@@ -193,13 +193,20 @@ test('a business message is answered as unsupported rather than ignored', async 
   await conn.opened
   for (let spent = 0; conn.messages.length === 0 && spent < 100; spent += 1) await new Promise(resolve => setTimeout(resolve, 10))
 
-  conn.ws.send(JSON.stringify({ v: 1, type: 'chat.message', payload: {} }))
+  // An unknown type: silence would be indistinguishable from a delivery failure, so the Hub says
+  // what it did not understand.
+  conn.ws.send(JSON.stringify({ v: 1, type: 'nonsense.type', payload: {} }))
   for (let spent = 0; conn.messages.length < 2 && spent < 100; spent += 1) await new Promise(resolve => setTimeout(resolve, 10))
-
-  // G3 has no fan-out. Saying "unsupported" is honest; dropping the frame would look like a
-  // delivery bug to a G4 client.
   assert.equal(conn.messages.length, 2)
   assert.equal(conn.messages[1].type, 'error')
-  assert.equal(conn.messages[1].code, 'unsupported')
+  assert.equal(conn.messages[1].code, 'frame/unsupported')
+
+  // A `chat.message` with no group is a client bug, and is reported as one instead of being
+  // dropped — the socket stays open either way (G4 fan-out lives in ws-events.test.js).
+  conn.ws.send(JSON.stringify({ v: 1, type: 'chat.message', payload: { text: 'hi' } }))
+  for (let spent = 0; conn.messages.length < 3 && spent < 100; spent += 1) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(conn.messages[2].type, 'error')
+  assert.equal(conn.messages[2].code, 'frame/invalid')
+  assert.equal(conn.ws.readyState, WebSocket.OPEN, 'a refused frame must not end the session')
   conn.ws.close()
 })

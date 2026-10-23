@@ -21,6 +21,13 @@ const emptyState = () => ({
   // (§6.4) requires these bindings to be persisted and rebuilt after a restart, so they
   // live in this domain's own file and never in the local team's.
   tasks: {},
+  // taskId -> the approval card a request became (host/task-runner.js). Persisted because a
+  // request that arrives while the panel is closed must still be there when somebody opens it,
+  // and a restart must not make a pending approval silently disappear.
+  taskRequests: {},
+  // taskId -> the request this machine sent and has not seen answered. Local only: the Hub's
+  // task row is the record, and this is what the panel polls between a send and its answer.
+  taskOutbox: {},
 })
 
 // Only what this domain understands is kept; an unknown or older shape resets to
@@ -29,7 +36,7 @@ function adopt(raw) {
   if (raw === null || typeof raw !== 'object' || raw.version !== WG_STATE_VERSION) return emptyState()
   const state = emptyState()
   if (Number.isFinite(raw.revision)) state.revision = raw.revision
-  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks']) {
+  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox']) {
     const value = raw[key]
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) state[key] = value
   }

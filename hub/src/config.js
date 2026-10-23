@@ -1,3 +1,9 @@
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
+
+// Whether a peer address is this machine. `::ffff:127.0.0.1` is what a dual-stack
+// listener reports for an IPv4 connection, so it counts.
+export const isLoopback = address => typeof address === 'string' && (LOOPBACK.has(address) || address.startsWith('127.'))
+
 // The Hub's settings, read once at startup from the environment. Every value that decides
 // whether credentials may cross the wire is resolved here so there is exactly one place
 // where a mistake could make the service insecure — and that place is tested.
@@ -35,6 +41,11 @@ export function loadConfig(env = process.env) {
   const cert = present(env.HUB_TLS_CERT) ? env.HUB_TLS_CERT : undefined
   const key = present(env.HUB_TLS_KEY) ? env.HUB_TLS_KEY : undefined
   const allowInsecure = env.HUB_ALLOW_INSECURE_LOCALHOST === '1'
+  // Plaintext on a routable address is a different decision from plaintext on loopback: the second
+  // reaches this machine only, the first puts every password on the local network. It is offered,
+  // but never assumed — without this flag the Hub refuses to start rather than silently binding
+  // somewhere else (which is what it used to do, and what made HUB_HOST=0.0.0.0 look accepted).
+  const allowPlaintextLan = env.HUB_ALLOW_PLAINTEXT_LAN === '1'
 
   if ((cert === undefined) !== (key === undefined)) {
     throw new ConfigError('HUB_TLS_CERT and HUB_TLS_KEY must be set together')
@@ -48,14 +59,25 @@ export function loadConfig(env = process.env) {
     )
   }
 
+  const host = env.HUB_HOST ?? '127.0.0.1'
+  // A plaintext listener that is not loopback can be reached from the local network, so every
+  // password crosses it in the clear. Refused unless the operator said so explicitly; the message
+  // names both ways out. Without TLS on loopback nothing changes.
+  if (cert === undefined && !isLoopback(host) && !allowPlaintextLan) {
+    throw new ConfigError(
+      `Refusing to listen on ${host} without TLS: passwords would cross the network in the clear. `
+      + 'Set HUB_TLS_CERT and HUB_TLS_KEY, or set HUB_ALLOW_PLAINTEXT_LAN=1 to accept that.',
+    )
+  }
+
   return {
-    host: env.HUB_HOST ?? '127.0.0.1',
+    host,
     port: readPort(env.HUB_PORT),
     tls: cert === undefined ? null : { cert, key },
     allowInsecure,
-    // Bindable only to loopback in plaintext: a plaintext listener on 0.0.0.0 would send
-    // passwords in the clear to anything that can reach the port.
-    insecureLoopbackOnly: cert === undefined,
+    allowPlaintextLan,
+    // Loopback in plaintext unless the operator accepted the local network explicitly.
+    insecureLoopbackOnly: cert === undefined && !allowPlaintextLan,
     dataDir: env.HUB_DATA_DIR ?? 'hub/.data',
     accessTtlMs: readTtl(env.HUB_ACCESS_TTL, DEFAULT_ACCESS_TTL_MS, 'HUB_ACCESS_TTL'),
     refreshTtlMs: readTtl(env.HUB_REFRESH_TTL, DEFAULT_REFRESH_TTL_MS, 'HUB_REFRESH_TTL'),
@@ -63,8 +85,3 @@ export function loadConfig(env = process.env) {
   }
 }
 
-const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
-
-// Whether a peer address is this machine. `::ffff:127.0.0.1` is what a dual-stack
-// listener reports for an IPv4 connection, so it counts.
-export const isLoopback = address => typeof address === 'string' && (LOOPBACK.has(address) || address.startsWith('127.'))

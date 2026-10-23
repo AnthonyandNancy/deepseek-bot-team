@@ -65,6 +65,42 @@ export const WG_CSS = `
 .bt-wg-conn-down{color:var(--bt-danger,#e02135)}
 .bt-wg-conn-down .bt-wg-conn-dot{background:var(--bt-danger,#e02135)}
 .bt-wg-conn-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* G4: the Hub roster, the invite control, the attachment note, and the archived banner.
+   The roster reuses the original bt-row rhythm so a member list reads like the team's own. */
+.bt-wg-roster{flex:none;display:flex;flex-direction:column;gap:6px;padding:0 20px 8px;max-height:168px;overflow-y:auto}
+.bt-wg-roster-head{font-size:11px;line-height:16px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--bt-ink-3,rgba(20,20,20,.36))}
+.bt-wg-roster-list{display:flex;flex-wrap:wrap;gap:6px}
+.bt-wg-roster-row{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;background:var(--bt-hover,rgba(119,119,119,.09));font-size:12px;line-height:18px;color:var(--bt-ink-2,rgba(20,20,20,.6))}
+.bt-wg-roster-row[data-member-type="botEndpoint"]{color:var(--bt-ink,#141414)}
+.bt-wg-roster-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
+.bt-wg-roster-role{font-size:10px;line-height:14px;padding:0 5px;border-radius:6px;background:var(--bt-card,#ffffff);color:var(--bt-ink-3,rgba(20,20,20,.36))}
+.bt-wg-invite{display:flex;align-items:center;gap:6px;margin-top:2px}
+.bt-wg-invite>.bt-input{flex:1 1 auto;min-width:0}
+.bt-wg-file{font-size:11px;color:var(--bt-ink-3,rgba(20,20,20,.36));max-width:150px}
+.bt-wg-note{padding:6px 10px;border-radius:8px;background:var(--bt-hover,rgba(119,119,119,.09));color:var(--bt-ink-2,rgba(20,20,20,.6));font-size:12px;line-height:17px}
+.bt-wg-archived{padding:8px 10px;border-radius:8px;margin:0 20px 8px;background:var(--bt-hover,rgba(119,119,119,.09));color:var(--bt-ink-2,rgba(20,20,20,.6));font-size:12px;line-height:17px}
+.bt-wg-compose-archived{padding:12px 20px 16px;color:var(--bt-ink-2,rgba(20,20,20,.6));font-size:12px;line-height:17px}
+.bt-wg-line[data-via="hub"] .bt-wg-line-who::after{content:" · Hub";font-size:10px;color:var(--bt-ink-3,rgba(20,20,20,.36));font-weight:400}
+.bt-wg-unread{flex:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;background:var(--bt-green,#00c972);color:#fff;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums}
+.bt-wg-presence{flex:none;width:6px;height:6px;border-radius:50%;background:var(--bt-ink-3,rgba(20,20,20,.36))}
+.bt-wg-presence-on{background:var(--bt-green,#00c972)}
+.bt-wg-inbox{display:flex;flex-direction:column;gap:6px;padding:0 16px 8px}
+.bt-wg-invite-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.bt-wg-invite-name{font-size:13px;line-height:18px;font-weight:500}
+.bt-wg-invite-from{font-size:11px;line-height:16px;color:var(--bt-ink-3,rgba(20,20,20,.36));margin-right:auto}
+.bt-wg-publish{display:flex;flex-direction:column;gap:4px}
+/* The approval cards. Same row vocabulary as the invite inbox, because they are the same kind of
+   thing: something from another account that waits for a decision here. */
+.bt-wg-tasks{display:flex;flex-direction:column;gap:6px;padding:0 16px 8px}
+.bt-wg-task-row{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:8px;background:var(--bt-hover,rgba(119,119,119,.09))}
+.bt-wg-task-title{font-size:13px;line-height:18px;font-weight:500}
+.bt-wg-task-meta{font-size:11px;line-height:16px;color:var(--bt-ink-3,rgba(20,20,20,.36))}
+.bt-wg-task-scope{font-size:11px;line-height:16px;color:var(--bt-ink-2,rgba(20,20,20,.6));word-break:break-word}
+.bt-wg-task-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
+.bt-wg-task-mode{flex:1 1 auto;min-width:0}
+.bt-wg-line-files{display:inline-flex;flex-wrap:wrap;gap:6px;margin-left:6px}
+.bt-wg-attach{display:inline-flex;align-items:center;gap:4px}
 .bt-wg-empty{flex:1 1 auto;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--bt-ink-2,rgba(20,20,20,.6));padding:24px;text-align:center}
 .bt-wg-error{margin:8px 8px 0;padding:8px 10px;border-radius:8px;background:var(--bt-hover,rgba(119,119,119,.09));color:var(--bt-danger,#e02135);font-size:12px;line-height:17px}
 

@@ -1,5 +1,7 @@
 # G4 入口
 
+- **状态：G4 自动部分完成**（2026-10-22）。门禁 2/3/4/5 有自动化证据；门禁 1/6 与 T19/T20 待人工。
+  见 [`../gates.md`](../gates.md)、[`EVIDENCE-MATRIX.md`](EVIDENCE-MATRIX.md)、[`ROUND-LOG.md`](ROUND-LOG.md)。
 - 前置：G3 迁移完成（`gates.md` 18 条自动门禁通过；人工清单待执行）
 - **续接指令：[`g4/NEXT-INSTRUCTION.md`](g4/NEXT-INSTRUCTION.md)（可直接整段复制给新会话；自足，不需要打开源仓库）**
 - 本文件只写入口与依赖，不含 G4 设计

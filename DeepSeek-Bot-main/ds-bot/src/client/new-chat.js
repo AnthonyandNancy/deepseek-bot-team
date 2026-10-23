@@ -77,9 +77,19 @@ export function NewChat({ mode, roster, actions }) {
     if (admin === null || picked.length === 0) return
     const text = message.trim()
     if (workgroupMode) {
-      const created = await actions.createWorkgroup([admin, ...picked], { admin, ...(text ? { text } : {}) })
-      actions.openWorkgroup?.(created.id)
-      close()
+      // A workgroup lives on the Hub (plan §8.1), so the host refuses to create one without an
+      // account. The refusal is passed on with a sentence that says what to do; the menu entry is
+      // not hidden, because a control that vanishes cannot explain why it went.
+      try {
+        const created = await actions.createWorkgroup([admin, ...picked], { admin, ...(text ? { text } : {}) })
+        actions.openWorkgroup?.(created.id)
+        close()
+      } catch (failure) {
+        if (failure?.code === 'hub/not-signed-in') {
+          throw Object.assign(new Error(t('A workgroup lives on the Hub. Sign in first, then create it.')), { code: failure.code, needsHub: true })
+        }
+        throw failure
+      }
       return
     }
     const room = await actions.createRoom([admin, ...picked], { admin, ...(text ? {} : { greet: true }) })

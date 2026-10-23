@@ -30,6 +30,10 @@ done
 | `src/workgroup/client/panel.js` | 工作群列表/创建/改名/删除/发送/停止；连接状态 |
 | `src/workgroup/client/rows.js` | 工作群行（与原版群行同款） |
 | `src/workgroup/client/styles.js` | `bt-wg-*` 样式 |
+| `src/workgroup/client/group-settings.js` | **群设置的复制件**（plan §5.1 A 类第 11 项）：成员卡下方「邀请同事」，成员卡之后「等你处理」审批卡 |
+| `src/workgroup/client/invite.js` | `WorkgroupInviteRow`：固定显示，不可用时禁用并说明原因 |
+| `src/workgroup/client/invite-target.js` | 一个字段区分手机号与 Hub 用户 ID（无 React 依赖，可单独测试） |
+| `src/workgroup/client/tasks.js` | `ApprovalCards` 从 `panel.js` 抽出，供面板与群设置共用 |
 | `src/client/hub-settings.js` | 「Hub 账号」设置页 |
 
 ## 2. 修改文件
@@ -50,6 +54,8 @@ done
 | `src/client/sources.js` | `indexRoster(value, workgroups)` + `groupRooms()` | 工作群按群组件要求的形状进 `roomsById` |
 | `src/client/sidebar.js` | 工作群行进入原版侧栏列表；群行补 `title` | 列表内混排，不新开分区 |
 | `src/client/new-chat.js` | 「Create workgroup」入口与创建路径 | 复用原版建群流程，只换目的地 |
+| `src/client/details-drawer.js` | **工作群走复制件的群设置**（`room.workgroup === true` 分流，一处三元） | 工作群行的实际路径是「原版会话 → 齿轮 → 群设置」，不改这里复制件不可达。§5.2 需补入本文件 |
+| `src/client/settings.js` | 同上，设置页的 `groups` 分支也分流 | §5.2 已列本文件 |
 | `src/client/context-menu.js` | 工作群行右键：设置、改名、删除；本地群新增「Upgrade to a workgroup」 | 右键菜单不能用本地群动作处理工作群 id |
 | `src/client/cells.js` | `source.kind === 'workgroup'` 用原版群消息卡片渲染 | 工作群回合卡片 |
 | `src/client/text.js` | `workgroup_relay` 归一为 `group_relay`；HEADER 增 `Workgroup post from` | 否则工作群回合什么都不画 |

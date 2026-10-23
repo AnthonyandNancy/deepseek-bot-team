@@ -4,6 +4,9 @@ import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
 
 const panelSrc = readFileSync(new URL('../src/workgroup/client/panel.js', import.meta.url), 'utf8')
+// The approval cards live in their own module now: the group settings drawer shows the same cards,
+// so a second copy of the assertions would be a second thing to keep in step.
+const tasksSrc = readFileSync(new URL('../src/workgroup/client/tasks.js', import.meta.url), 'utf8')
 const rowsSrc = readFileSync(new URL('../src/workgroup/client/rows.js', import.meta.url), 'utf8')
 const sidebarSrc = readFileSync(new URL('../src/client/sidebar.js', import.meta.url), 'utf8')
 const indexSrc = readFileSync(new URL('../src/client/index.js', import.meta.url), 'utf8')
@@ -136,4 +139,55 @@ test('the difference manifest still records the originals it did NOT change', ()
     assert.ok(manifest.includes(file), `the manifest still names ${file} as unchanged`)
   }
   assert.match(manifest, /逐字节相同|byte-identical/, 'and says how that was checked')
+})
+
+// ── G5: the approval card ─────────────────────────────────────────────────────────
+// The G4 audit found six endpoints with no caller: a feature that existed on the host and nowhere a
+// person could reach it. These pin the other direction — the card exists, it calls the endpoints that
+// answer, and it refuses to hide the scope a person is approving.
+
+test('the approval card is wired to the endpoints that answer it', () => {
+  assert.match(tasksSrc, /function ApprovalCards\(/, 'the component exists')
+  // The list it draws comes from the host, not from a local guess.
+  assert.match(tasksSrc, /await callWorkgroup\('task-requests'\)/)
+  // Both answers exist, and both go through the decision endpoint.
+  assert.match(tasksSrc, /callWorkgroup\('task-decide', \{\s*taskId: request\.taskId,\s*decision,/)
+  assert.match(tasksSrc, /void decide\(request, 'granted'\)/)
+  assert.match(tasksSrc, /void decide\(request, 'rejected'\)/)
+  // And it is actually rendered by the panel, not merely defined beside it.
+  assert.match(panelSrc, /\n      h\(ApprovalCards, \{ onChanged:/, 'the panel renders it')
+})
+
+test('the three ways to assign a task are all offered', () => {
+  for (const mode of ['existingBot', 'chiefPicks', 'newBot']) {
+    assert.match(tasksSrc, new RegExp(`value: '${mode}'`), `${mode} must be offered`)
+  }
+})
+
+test('the card shows the requested scope before the decision', () => {
+  // A scope nobody read is a scope nobody approved, so the resources and capabilities appear on the
+  // card rather than only being stored.
+  assert.match(tasksSrc, /request\.resources/)
+  assert.match(tasksSrc, /request\.capabilities/)
+  assert.match(tasksSrc, /bt-wg-task-scope/)
+})
+
+test('a card with nothing waiting renders nothing at all', () => {
+  // Neither a request nor a task of this machine's own: nothing to draw, so the panel does not draw
+  // an empty section header.
+  assert.match(tasksSrc, /if \(requests\.length === 0 && active\.length === 0\) return null/)
+})
+
+test('an approved task can be started, finished and stopped from the panel', () => {
+  // The G4 audit found six host endpoints with no caller; these three are the ones a person needs
+  // after approving, so each must be reachable from the card.
+  assert.match(tasksSrc, /callWorkgroup\(endpoint, \{ taskId \}\)/)
+  assert.match(tasksSrc, /run\(task\.taskId, 'task-start'\)/)
+  assert.match(tasksSrc, /run\(task\.taskId, 'task-finish'\)/)
+  assert.match(tasksSrc, /run\(task\.taskId, 'task-cancel'\)/)
+  // Start is offered only while the ledger says it may run, so the UI cannot present an action the
+  // guard would refuse.
+  assert.match(tasksSrc, /task\.state === 'APPROVED' && task\.live/)
+  // And the running half comes from the same host call as the waiting half.
+  assert.match(tasksSrc, /setActive\(answer\.active \?\? \[\]\)/)
 })

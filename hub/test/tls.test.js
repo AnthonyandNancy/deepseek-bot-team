@@ -8,9 +8,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { request } from 'node:https'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ConfigError, isLoopback, loadConfig } from '../src/config.js'
 import { createHub } from '../src/server.js'
@@ -45,6 +46,36 @@ test('the loopback opt-in is explicit and yields a loopback-only config', () => 
   const opted = loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: '1' })
   assert.equal(opted.tls, null)
   assert.equal(opted.insecureLoopbackOnly, true)
+})
+
+test('a plaintext bind outside loopback is refused unless it is asked for by name', () => {
+  const base = { HUB_ALLOW_INSECURE_LOCALHOST: '1' }
+  // The old behaviour rewrote this to 127.0.0.1 and started anyway, so HUB_HOST=0.0.0.0 looked
+  // accepted while the local network could not reach the Hub. A refusal says what to do instead.
+  assert.throws(() => loadConfig({ ...base, HUB_HOST: '0.0.0.0' }), /passwords would cross the network in the clear/)
+  assert.throws(() => loadConfig({ ...base, HUB_HOST: '192.168.1.10' }), ConfigError)
+  // The message names both ways out, because either one is a real choice.
+  try {
+    loadConfig({ ...base, HUB_HOST: '0.0.0.0' })
+  } catch (error) {
+    assert.match(error.message, /HUB_TLS_CERT/)
+    assert.match(error.message, /HUB_ALLOW_PLAINTEXT_LAN=1/)
+  }
+
+  const opted = loadConfig({ ...base, HUB_HOST: '0.0.0.0', HUB_ALLOW_PLAINTEXT_LAN: '1' })
+  assert.equal(opted.host, '0.0.0.0')
+  // Not loopback-only any more, which is what lets server.listen bind it.
+  assert.equal(opted.insecureLoopbackOnly, false)
+})
+
+test('plaintext on loopback needs no extra flag, and TLS makes the address irrelevant', () => {
+  // The common case must stay one flag: loopback plaintext is the local-only mode.
+  const loopback = loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: '1', HUB_HOST: '127.0.0.1' })
+  assert.equal(loopback.insecureLoopbackOnly, true)
+  // With a certificate the bind address is the operator's business.
+  const tls = loadConfig({ HUB_TLS_CERT: CERT, HUB_TLS_KEY: KEY, HUB_HOST: '0.0.0.0' })
+  assert.equal(tls.host, '0.0.0.0')
+  assert.equal(tls.insecureLoopbackOnly, false)
 })
 
 test('ttl and port values are validated rather than taken on trust', () => {
@@ -163,4 +194,30 @@ test('login over a trusted TLS connection works end to end', async (t) => {
   const loggedIn = await post('/v1/auth/login', { phone: PHONE_A, password: PASSWORD })
   assert.equal(loggedIn.status, 200)
   assert.equal(loggedIn.body.hubUserId, registered.body.hubUserId)
+})
+
+test('with the flag set, plaintext really binds the network address it was given', async () => {
+  // The defect this covers: the config used to be accepted and the bind quietly rewritten to
+  // 127.0.0.1, so a second machine could not connect and nothing said why. This asserts the address
+  // the socket actually reports, not the address in the config.
+  const config = loadConfig({ HUB_ALLOW_INSECURE_LOCALHOST: '1', HUB_ALLOW_PLAINTEXT_LAN: '1', HUB_HOST: '0.0.0.0', HUB_PORT: '0' })
+  const { lines, logger } = createMemoryLogger()
+  const dataDir = mkdtempSync(join(tmpdir(), 'hub-lan-'))
+  const hub = createHub({ config: { ...config, dataDir }, logger })
+  try {
+    const address = await hub.listen()
+    assert.equal(config.insecureLoopbackOnly, false)
+    assert.equal(config.host, '0.0.0.0')
+    // `server.address()` reports what the socket is bound to. `::` is the IPv6 spelling of "every
+    // address", which some platforms give back for 0.0.0.0.
+    assert.ok(
+      address.host === '0.0.0.0' || address.host === '::',
+      `the listener must be on every interface, got ${address.host}`,
+    )
+    // And it says so, once, because this is the state where passwords cross the network.
+    assert.equal(lines.some(line => line.includes('hub.plaintext-on-network')), true)
+  } finally {
+    await hub.close()
+    rmSync(dataDir, { recursive: true, force: true })
+  }
 })

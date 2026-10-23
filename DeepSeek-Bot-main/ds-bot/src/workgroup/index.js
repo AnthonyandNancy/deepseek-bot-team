@@ -13,17 +13,28 @@
 import * as state from './host/state.js'
 import * as ownership from './host/ownership.js'
 import * as tasks from './host/tasks.js'
+import * as taskRunner from './host/task-runner.js'
 import * as groups from './host/groups.js'
 import * as hub from './host/hub.js'
+import * as bridge from './host/bridge.js'
+import * as upgrade from './host/upgrade.js'
 import * as channel from './host/channel.js'
 
 // Order matters the same way it does in ../../index.js: state and ownership before
 // anything that resolves a Session, tasks and groups before the route that exposes them.
 // tasks installs before groups because it claims task Sessions through ownership and
 // chains onto the same `onStateLoaded` hook groups never touches.
+// `taskRunner` installs right after tasks: it is what drives the registry from the wire, and it
+// registers the tool guard at install time — after groups, a task turn could start before the guard
+// existed, which is the one ordering plan §10.4 cannot tolerate.
 // `hub` installs after groups and before channel: the channel answers the `hub-*` endpoints and
 // needs `wg.hub` to exist, while nothing in groups depends on the Hub.
-const WG_MODULES = [state, ownership, tasks, groups, hub, channel]
+// `bridge` installs after `hub` (it is a client of that client) and before `channel` (the channel
+// exposes its status). It starts nothing at install time: a team with no Hub pays nothing, and a
+// Hub that is down cannot slow a startup.
+// `upgrade` installs after `bridge` (an upgrade calls the Hub through it) and before `channel` (the
+// `upgrade-room` endpoint belongs to it).
+const WG_MODULES = [state, ownership, tasks, taskRunner, groups, hub, bridge, upgrade, channel]
 
 export function installWorkgroup(rt) {
   if (rt === undefined || rt === null) throw new Error('ds-bot: installWorkgroup needs the runtime')
@@ -42,7 +53,10 @@ export function installWorkgroup(rt) {
     roomProgress: new Map(),
     roomInbox: new Map(),
     tasks: new Map(),
-    bridge: null,         // filled in G3+
+    // Filled by host/bridge.js: the Hub socket, its outbox and its inbox. G1 left this `null` as
+    // the seam for cross-device delivery, G3 filled it with the HTTP client alone because there was
+    // nothing to bridge yet, and G4 installs the real connection.
+    bridge: null,
     installedAt: Date.now(),
   }
   rt.workgroup = wg

@@ -16,13 +16,29 @@ function fakeLocale(active) {
 }
 
 test('every literal the client translates has a Chinese entry', () => {
-  const dir = new URL('../src/client/', import.meta.url)
+  // Both client directories, not just `src/client/`: the Workgroup panel is a second surface with
+  // its own strings, and scanning only the first one let sixteen untranslated keys through. A
+  // missing entry is invisible until someone runs the Chinese UI, which is the shape of bug this
+  // test exists to catch.
+  const dirs = [
+    new URL('../src/client/', import.meta.url),
+    new URL('../src/workgroup/client/', import.meta.url),
+  ]
   const missing = []
-  for (const name of readdirSync(dir).filter(file => file.endsWith('.js'))) {
-    const text = readFileSync(new URL(name, dir), 'utf8')
-    for (const match of text.matchAll(/\bt\(\s*(['"])((?:\\.|(?!\1).)*)\1/g)) {
-      const key = match[2].replace(/\\'/g, "'")
-      if (!Object.hasOwn(DICTIONARY.zh, key)) missing.push(`${name}: ${key}`)
+  for (const dir of dirs) {
+    for (const name of readdirSync(dir).filter(file => file.endsWith('.js'))) {
+      // Comments are stripped first: this repository's sources quote the shipped DSH registrations
+      // verbatim, and a quoted `t("panel")` is documentation of another package's string, not one
+      // this plugin has to translate.
+      const text = readFileSync(new URL(name, dir), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split(/\r?\n/)
+        .filter(line => !line.trim().startsWith('//'))
+        .join('\n')
+      for (const match of text.matchAll(/\bt\(\s*(['"])((?:\\.|(?!\1).)*)\1/g)) {
+        const key = match[2].replace(/\\'/g, "'")
+        if (!Object.hasOwn(DICTIONARY.zh, key)) missing.push(`${name}: ${key}`)
+      }
     }
   }
   assert.deepEqual(missing, [])

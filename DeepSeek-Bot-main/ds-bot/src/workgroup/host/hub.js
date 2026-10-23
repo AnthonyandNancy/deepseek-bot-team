@@ -70,6 +70,18 @@ export const publicFromPrivate = privateKeyPem =>
 export const signChallenge = (privateKeyPem, challengeId, nonce) =>
   sign(null, Buffer.from(`${challengeId}.${nonce}`), createPrivateKey(privateKeyPem)).toString('base64')
 
+// What the Hub verifies for a socket handshake: `<deviceId>.<timestamp>.<nonce>`. It lives here,
+// beside the other signing helper, so the private key is read in exactly one module and the
+// bridge never holds it (docs/g3/PLAN.md §8.3: the settings page cannot obtain the long-lived key).
+export const signHandshake = (privateKeyPem, deviceId, timestamp, nonce) =>
+  sign(null, Buffer.from(`${deviceId}.${timestamp}.${nonce}`), createPrivateKey(privateKeyPem)).toString('base64')
+
+// What the Hub verifies for a task envelope (plan §9.2): a signature over bytes this module does not
+// assemble. The caller passes the canonical bytes (`host/envelope.js` builds them), so the shape of
+// an envelope lives in one place and the private key lives in another.
+export const signBytes = (privateKeyPem, bytes) =>
+  sign(null, bytes, createPrivateKey(privateKeyPem)).toString('base64')
+
 export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, now = () => Date.now() } = {}) {
   // Memory only. `undefined` means "no usable access token right now".
   let accessToken
@@ -322,14 +334,190 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
     async health(baseUrl) {
       return call(trimBase(baseUrl), '/v1/health', { method: 'GET' })
     },
+
+    // ── what the bridge needs, and nothing more ───────────────────────────────────
+    // The socket handshake is signed here rather than in the bridge: the private key is never
+    // returned to a caller, so no other module — and certainly not the settings page — can read
+    // it. `sign` closes over the stored key for the lifetime of one return value.
+    async socketAuth() {
+      const token = await ensureAccess()
+      const stored = await store.load()
+      if (stored === undefined) throw new HubRequestError('This device is not signed in to the Hub.', { code: 'hub/not-signed-in' })
+      return {
+        baseUrl: trimBase(stored.baseUrl),
+        hubUserId: stored.hubUserId,
+        deviceId: stored.deviceId,
+        accessToken: token,
+        sign: (deviceId, timestamp, nonce) => signHandshake(stored.privateKeyPem, deviceId, timestamp, nonce),
+        // The same key, used for a task envelope. Separate from `sign` so a caller cannot
+        // accidentally reuse the handshake payload for a request (which the Hub would refuse) or the
+        // other way round.
+        signPayload: bytes => signBytes(stored.privateKeyPem, bytes),
+      }
+    },
+
+    // ── groups ────────────────────────────────────────────────────────────────────
+    // One thin method per endpoint, so the bridge holds no URL strings and a Hub route rename
+    // cannot leave a stale path in two places.
+    async createWorkgroup({ name, notice, upgradeId, endpointIds }) {
+      const token = await ensureAccess()
+      return call(address(), '/v1/workgroups', {
+        body: {
+          name,
+          ...(notice === undefined ? {} : { notice }),
+          ...(upgradeId === undefined ? {} : { upgradeId }),
+          ...(endpointIds === undefined ? {} : { endpointIds }),
+        },
+        token,
+      })
+    },
+    async workgroups() {
+      const token = await ensureAccess()
+      return (await call(address(), '/v1/workgroups', { method: 'GET', token })).workgroups ?? []
+    },
+    async workgroup(workgroupId) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}`, { method: 'GET', token })
+    },
+    async invite({ workgroupId, phone, hubUserId }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/invites`, {
+        body: { ...(phone === undefined ? {} : { phone }), ...(hubUserId === undefined ? {} : { hubUserId }) },
+        token,
+      })
+    },
+    async invites() {
+      const token = await ensureAccess()
+      return (await call(address(), '/v1/invites', { method: 'GET', token })).invites ?? []
+    },
+    async answerInvite({ inviteId, accept }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/invites/${encodeURIComponent(inviteId)}/${accept ? 'accept' : 'decline'}`, { token })
+    },
+    async events({ workgroupId, afterSeq = 0, limit }) {
+      const token = await ensureAccess()
+      const query = `afterSeq=${encodeURIComponent(String(afterSeq))}${limit === undefined ? '' : `&limit=${encodeURIComponent(String(limit))}`}`
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/events?${query}`, { method: 'GET', token })
+    },
+    async markRead({ workgroupId, seq }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/read`, { body: { seq }, token })
+    },
+    async botEndpoints({ workgroupId } = {}) {
+      const token = await ensureAccess()
+      const query = workgroupId === undefined ? '' : `?workgroupId=${encodeURIComponent(workgroupId)}`
+      return call(address(), `/v1/bot-endpoints${query}`, { method: 'GET', token })
+    },
+    async publishBotEndpoint({ localBotId, name, capabilities, visibility }) {
+      const token = await ensureAccess()
+      return call(address(), '/v1/bot-endpoints', {
+        body: { localBotId, name, ...(capabilities === undefined ? {} : { capabilities }), ...(visibility === undefined ? {} : { visibility }) },
+        token,
+      })
+    },
+
+    // ── attachments ───────────────────────────────────────────────────────────────
+    // The bytes are read by the caller and posted as base64; a path is never part of the request,
+    // which is what makes "the Hub cannot name a file on this machine" structural (plan §13.2).
+    async uploadAttachment({ workgroupId, name, mime, data }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/attachments`, { body: { name, mime, data }, token })
+    },
+    async attachmentTicket({ attachmentId }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/attachments/${encodeURIComponent(attachmentId)}/ticket`, { token })
+    },
+    async downloadAttachment({ attachmentId, ticket }) {
+      const token = await ensureAccess()
+      const path = `/v1/attachments/${encodeURIComponent(attachmentId)}/download?ticket=${encodeURIComponent(ticket)}`
+      const response = await fetchImpl(`${address()}${path}`, { headers: { authorization: `Bearer ${token}` } })
+      if (!response.ok) {
+        throw new HubRequestError(`The Hub refused the download (HTTP ${response.status}).`, { code: `hub/http-${response.status}`, status: response.status })
+      }
+      return Buffer.from(await response.arrayBuffer())
+    },
+    async revokeBotEndpoint({ endpointId }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/bot-endpoints/${encodeURIComponent(endpointId)}/revoke`, { token })
+    },
+
+    // ── tasks (G5) ────────────────────────────────────────────────────────────────
+    // A task is REQUESTED over the socket (the outbox gives it at-least-once delivery for free) and
+    // DECIDED over HTTP, which is exactly the split plan §13.1 draws. These are the HTTP halves.
+    async task(taskId) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/tasks/${encodeURIComponent(taskId)}`, { method: 'GET', token })
+    },
+    async tasks({ workgroupId, role } = {}) {
+      const token = await ensureAccess()
+      const query = new URLSearchParams()
+      if (workgroupId !== undefined) query.set('workgroupId', workgroupId)
+      if (role !== undefined) query.set('role', role)
+      const suffix = query.toString() === '' ? '' : `?${query.toString()}`
+      return (await call(address(), `/v1/tasks${suffix}`, { method: 'GET', token })).tasks ?? []
+    },
+    async decideTask({ taskId, decision, scope }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/tasks/${encodeURIComponent(taskId)}/decision`, {
+        body: { decision, ...(scope === undefined ? {} : { scope }) },
+        token,
+      })
+    },
+    async revokeTask({ taskId, reason }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/tasks/${encodeURIComponent(taskId)}/revoke`, {
+        body: reason === undefined ? {} : { reason },
+        token,
+      })
+    },
+
+    // ── artifacts (G5) ────────────────────────────────────────────────────────────
+    // Bytes, never a path: the caller reads the file and posts base64, exactly like the attachment
+    // relay. What differs is that the Hub checks the task's approval before it stores anything.
+    async uploadArtifact({ taskId, name, mime, data, acl }) {
+      const token = await ensureAccess()
+      return call(address(), '/v1/artifacts/uploads', {
+        body: { taskId, name, mime, data, ...(acl === undefined ? {} : { acl }) },
+        token,
+      })
+    },
+    async taskArtifacts({ taskId }) {
+      const token = await ensureAccess()
+      return (await call(address(), `/v1/tasks/${encodeURIComponent(taskId)}/artifacts`, { method: 'GET', token })).artifacts ?? []
+    },
+    async downloadArtifact({ artifactId }) {
+      const token = await ensureAccess()
+      const response = await fetchImpl(`${address()}/v1/artifacts/${encodeURIComponent(artifactId)}/download`, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) {
+        throw new HubRequestError(`The Hub refused the artifact download (HTTP ${response.status}).`, { code: `hub/http-${response.status}`, status: response.status })
+      }
+      return Buffer.from(await response.arrayBuffer())
+    },
+
+    // ── the coordinator lease (G5) ────────────────────────────────────────────────
+    // Over HTTP as well as over the socket: the socket path is the one a round uses, and this exists
+    // so a reconnecting client can ask "am I still the coordinator?" before it starts anything.
+    async lease({ workgroupId }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/lease`, { method: 'GET', token })
+    },
+    // Only the READ is here. Taking and releasing a lease happens over the socket
+    // (`bridge.acquireLease`), because a round commits while it runs and the fence has to be checked on
+    // the connection the round is already using. An HTTP acquire existed for a while and had no caller
+    // once the round took over, so it is gone rather than left as a second door.
   }
 
   return client
 }
 
-// One install, into the runtime this domain already has. `wg.bridge` is the placeholder
-// src/workgroup/index.js left for exactly this ("filled in G3+"): the Hub connection belongs to
-// the remote domain, so it lives here rather than in the original src/host/.
+// One install, into the runtime this domain already has: the account store and the HTTP client.
+//
+// `wg.bridge` used to be set to this client here, standing in for a connection that did not exist
+// yet. G4 installs host/bridge.js instead, which wraps this client in a real socket. Keeping the
+// HTTP client separate matters: the account page, the login flow and the health check all work
+// with no socket at all, and a Hub that refuses WSS must not take the settings page down.
 //
 // Nothing is started: no timer, no socket, no file read at install time. The account is restored
 // when the settings page asks for it, so a Bot team with no Hub configured pays nothing and a
@@ -338,5 +526,4 @@ export function install(wg) {
   const { rt } = wg
   wg.hubStore = createHubStore({ ctx: rt.ctx, home: rt.home, logger: rt })
   wg.hub = createHubClient({ store: wg.hubStore, logger: rt })
-  wg.bridge = wg.hub
 }

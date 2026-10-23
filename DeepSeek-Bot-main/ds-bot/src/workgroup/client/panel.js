@@ -13,8 +13,9 @@
 //
 // G1 scope: list, create, open, rename, delete, send, stop. Everything calls the
 // separate `api/workgroup` route. No Hub, no remote members yet.
-import { createElement as h, useCallback, useEffect, useMemo, useState } from 'react'
+import { createElement as h, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { callWorkgroup } from './api.js'
+import { ApprovalCards } from './tasks.js'
 import { createSource } from '../../client/sources.js'
 import { RoomAvatar } from '../../client/mark.js'
 import { t } from '../../client/i18n.js'
@@ -57,6 +58,16 @@ export async function openWorkgroup(id) {
   try {
     const room = await callWorkgroup('room', { id })
     setState({ room })
+    // Opening a group is reading it. The cursor is written here rather than on a timer: "opened"
+    // is exactly the event the count is supposed to describe.
+    const hubWorkgroupId = room?.hub?.workgroupId
+    if (hubWorkgroupId !== undefined) {
+      const seq = room?.hub?.cursor ?? 0
+      if (seq > 0) {
+        await callWorkgroup('mark-read', { workgroupId: hubWorkgroupId, seq }).catch(() => {})
+        await refreshWorkgroups()
+      }
+    }
   } catch (error) {
     setState({ error: error?.message ?? String(error) })
   }
@@ -121,7 +132,12 @@ export function RoomRow({ room, active, onOpen }) {
     room.linkedLocalName
       ? h('span', { className: 'bt-wg-link' }, t('Upgraded from {name}', { name: room.linkedLocalName }))
       : null),
-  room.approval ? h('span', { className: 'bt-badge', 'aria-label': t('Waiting for your approval') }, '!') : null)
+  room.approval ? h('span', { className: 'bt-badge', 'aria-label': t('Waiting for your approval') }, '!') : null,
+  // Unread, from the Hub's own count for this person. Absent for a group that is not on the Hub:
+  // a local workgroup has no cursor, and inventing one would show a number nobody can clear.
+  room.unread > 0
+    ? h('span', { className: 'bt-wg-unread', 'aria-label': t('{count} unread', { count: room.unread }), 'data-unread': String(room.unread) }, String(room.unread))
+    : null)
 }
 
 
@@ -195,16 +211,68 @@ function ConnectionLine() {
   h('span', { className: 'bt-wg-conn-text' }, label))
 }
 
-function Composer({ roomId, onSent }) {
+// Read a picked file as base64. The bytes are what travels; the file's path never leaves this
+// function, which is the whole shape of the relay (plan §13.2).
+const readAsBase64 = file => new Promise((resolve, reject) => {
+  const reader = new FileReader()
+  reader.onerror = () => reject(new Error('That file could not be read.'))
+  reader.onload = () => {
+    const result = String(reader.result ?? '')
+    // `data:...;base64,XXXX` → `XXXX`. A browser hands a data URL; the Hub wants bare base64.
+    const comma = result.indexOf(',')
+    resolve(comma === -1 ? result : result.slice(comma + 1))
+  }
+  reader.readAsDataURL(file)
+})
+
+function Composer({ roomId, hub, archived, onSent }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState(null)
+  const fileInput = useRef(null)
+
+  // An upgraded local group is history: it is not deleted and it is not read-only in the sense of
+  // hidden, but a message typed here would go nowhere. Saying so is the honest answer.
+  if (archived) {
+    return h('div', { className: 'bt-wg-compose bt-wg-compose-archived', role: 'note', 'data-archived': 'true' },
+      t('This group was upgraded to a workgroup. It stays here as read-only history; conversation continues in the workgroup.'))
+  }
+
   const send = async () => {
     if (text.trim() === '' || busy) return
     setBusy(true)
-    const ok = await run(() => callWorkgroup('send', { roomId, text }))
+    setNote(null)
+    // A Hub group's message goes to the Hub FIRST: the pane calls `send-hub`, which returns once
+    // the Hub has it. A room with no Hub keeps the original local path.
+    const ok = await run(() => (hub === null
+      ? callWorkgroup('send', { roomId, text })
+      : callWorkgroup('send-hub', { workgroupId: hub.workgroupId, text })))
     setBusy(false)
-    if (ok) { setText(''); onSent?.() }
+    if (ok) { setText(''); onSent?.() } else setNote(t('That message was not sent. It is still in the box.'))
   }
+
+  const attach = async (file) => {
+    if (file === undefined || hub === null || busy) return
+    setBusy(true)
+    setNote(null)
+    try {
+      const data = await readAsBase64(file)
+      const sent = await callWorkgroup('send-attachment', {
+        workgroupId: hub.workgroupId,
+        name: file.name,
+        mime: file.type || 'application/octet-stream',
+        data,
+      })
+      setNote(t('Sent {name} ({size} bytes).', { name: sent.name, size: sent.size }))
+      onSent?.()
+    } catch (error) {
+      setNote(error?.message ?? String(error))
+    } finally {
+      setBusy(false)
+      if (fileInput.current !== null) fileInput.current.value = ''
+    }
+  }
+
   return h('div', { className: 'bt-wg-compose' },
     h('textarea', {
       className: 'bt-wg-compose-input',
@@ -217,7 +285,18 @@ function Composer({ roomId, onSent }) {
         if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() }
       },
     }),
+    note === null ? null : h('div', { className: 'bt-wg-note', role: 'status' }, note),
     h('div', { className: 'bt-wg-compose-actions' },
+      // Only a Hub group can carry a file: a local workgroup's members are Bots on this machine and
+      // the relay is the Hub's. Offering the control where it cannot work would be a dead button.
+      hub === null ? null : h('span', null,
+        h('input', {
+          ref: fileInput,
+          type: 'file',
+          className: 'bt-wg-file',
+          'aria-label': t('Attach a file'),
+          onChange: event => void attach(event.target.files?.[0]),
+        })),
       h('button', {
         type: 'button',
         className: 'bt-soft bt-soft-sm',
@@ -226,18 +305,197 @@ function Composer({ roomId, onSent }) {
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy || text.trim() === '', onClick: send }, busy ? t('Sending…') : t('Send'))))
 }
 
+// The Hub line of a group that lives on the Hub: whether the socket is up, how far this machine
+// has read the group's log, and whether anything it typed is still waiting for the Hub's ack.
+//
+// It is deliberately separate from `ConnectionLine` below: that one measures THIS plugin's route
+// (is the host answering?), this one reports the Hub. Two different failures must not look alike.
+function HubLine({ hub }) {
+  if (hub === null) return null
+  const state = hub.connected ? 'online' : 'offline'
+  const label = hub.pending > 0
+    ? t('Waiting for the Hub: {count} message(s).', { count: hub.pending })
+    : hub.connected
+      ? t('Connected to the Hub · read to #{seq}', { seq: hub.cursor })
+      : t('Offline: messages are kept and sent when the Hub comes back.')
+  return h('div', {
+    className: `bt-wg-conn bt-wg-conn-${state === 'online' ? 'ok' : 'down'}`,
+    role: 'status',
+    'aria-live': 'polite',
+    'data-hub': state,
+    'data-pending': String(hub.pending ?? 0),
+  },
+  h('span', { className: 'bt-wg-conn-dot', 'aria-hidden': true }),
+  h('span', { className: 'bt-wg-conn-text' }, label))
+}
+
+// One attachment in a log line, as a button that fetches the bytes through the plugin's own route.
+//
+// The bytes are relayed, not linked: the Hub's ticket is short-lived and tied to one person, so
+// handing the client a URL would put that ticket in a place the browser keeps. The button asks, the
+// host fetches, the browser saves.
+function AttachmentLink({ attachment, name }) {
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState(null)
+  const label = name ?? attachment?.name ?? t('file')
+  if (attachment?.attachmentId === undefined) {
+    // An attachment this machine cannot fetch (expired, or an older line without an id): say the
+    // name rather than offering a button that cannot work.
+    return h('span', { className: 'bt-wg-attach bt-wg-attach-plain' }, label)
+  }
+  const fetchIt = async () => {
+    setBusy(true)
+    setNote(null)
+    try {
+      const answer = await callWorkgroup('attachment-download', { attachmentId: attachment.attachmentId })
+      // `data` is base64, which in a plugin route is the only way bytes cross without a second
+      // transport. The save itself is the browser's job, so the user chooses where it lands.
+      const href = `data:${attachment.mime ?? 'application/octet-stream'};base64,${answer.data}`
+      const link = document.createElement('a')
+      link.href = href
+      link.download = answer.name ?? label
+      link.rel = 'noopener'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+    } catch (error) {
+      setNote(error?.message ?? String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return h('span', { className: 'bt-wg-attach' },
+    h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: fetchIt },
+      busy ? t('Downloading…') : t('Download {name}', { name: label })),
+    note === null ? null : h('span', { className: 'bt-wg-note', role: 'status' }, note))
+}
+
+// The members of a Hub group, as the Hub reports them, plus the invite control. A person is shown
+// as a masked phone number (the Hub never returns a full one to a member), and a Bot endpoint as
+// the name its owner published.
+function MemberList({ hub, members, onInvite }) {
+  const [phone, setPhone] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState(null)
+  const [published, setPublished] = useState(null)
+  if (hub === null) return null
+
+  const publish = async () => {
+    setBusy(true)
+    setPublished(null)
+    try {
+      const answer = await callWorkgroup('publish-endpoints')
+      setPublished(t('Published {count} Bot(s).', { count: (answer.endpoints ?? []).length }))
+      onInvite?.()
+    } catch (error) {
+      setPublished(error?.message ?? String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const invite = async () => {
+    const value = phone.trim()
+    if (value === '' || busy) return
+    setBusy(true)
+    setNote(null)
+    try {
+      const sent = await callWorkgroup('invite-member', { workgroupId: hub.workgroupId, phone: value })
+      setNote(t('Invited {phone}.', { phone: sent.inviteePhoneMasked }))
+      setPhone('')
+      onInvite?.()
+    } catch (error) {
+      setNote(error?.message ?? String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return h('div', { className: 'bt-wg-roster', 'data-members': String(members.length) },
+    h('div', { className: 'bt-wg-roster-head' }, t('Members')),
+    h('div', { className: 'bt-wg-roster-list', role: 'list' },
+      members.map(member => h('div', {
+        key: member.membershipId,
+        className: 'bt-wg-roster-row',
+        role: 'listitem',
+        'data-member-type': member.memberType,
+        'data-member-role': member.role,
+      },
+      // A person's presence, from the Hub. A Bot endpoint has no socket of its own, so it shows no
+      // dot rather than a misleading one.
+      member.userId === undefined
+        ? null
+        : h('span', {
+          className: `bt-wg-presence bt-wg-presence-${member.online === true ? 'on' : 'off'}`,
+          'aria-label': member.online === true ? t('Online') : t('Offline'),
+          'data-online': member.online === true ? 'true' : 'false',
+        }),
+      h('span', { className: 'bt-wg-roster-name' },
+        // A Bot endpoint shows its published name; a person shows the masked number the Hub gives.
+        member.memberType === 'botEndpoint' ? t('Bot') : member.phoneMasked ?? t('A member')),
+      member.role === 'owner' ? h('span', { className: 'bt-wg-roster-role' }, t('Owner')) : null))),
+    // Publishing is what makes this machine's Bots addressable in a group. It is a button rather
+    // than something automatic on every panel open, because it is a decision about what this machine
+    // offers other people — and the host refuses it while signed out, which is what the note says.
+    h('div', { className: 'bt-wg-publish' },
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: publish },
+        t('Publish my Bots to this group')),
+      published === null ? null : h('div', { className: 'bt-wg-note', role: 'status' }, published)),
+    h('div', { className: 'bt-wg-invite' },
+      h('input', {
+        className: 'bt-input',
+        value: phone,
+        placeholder: t('Invite by phone number'),
+        'aria-label': t('Phone number to invite'),
+        onChange: event => setPhone(event.target.value),
+        onKeyDown: (event) => { if (event.key === 'Enter') void invite() },
+      }),
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy || phone.trim() === '', onClick: invite },
+        busy ? t('Inviting…') : t('Invite'))),
+    note === null ? null : h('div', { className: 'bt-wg-note', role: 'status' }, note))
+}
+
 function ChatPane({ roomId, roster }) {
   const state = useWorkgroupState()
   const room = state.room
+  // The Hub roster is fetched separately from the room, because it lives on the Hub and the room
+  // lives here: a Hub that is down must not stop the conversation that is already on screen.
+  const [members, setMembers] = useState([])
+  const hubWorkgroupId = room?.hub?.workgroupId
+
+  useEffect(() => {
+    if (hubWorkgroupId === undefined) { setMembers([]); return undefined }
+    let live = true
+    void callWorkgroup('group-members', { workgroupId: hubWorkgroupId })
+      .then((answer) => { if (live) setMembers(answer.members ?? []) })
+      .catch(() => { if (live) setMembers([]) })
+    return () => { live = false }
+  }, [hubWorkgroupId, room?.log?.length])
+
   if (roomId === null) return h('div', { className: 'bt-wg-empty' }, t('Pick a workgroup, or create one.'))
   if (room === null) return h('div', { className: 'bt-wg-empty' }, t('Loading…'))
+
   const lines = (room.log ?? []).map((line) => {
     const body = line.kind === undefined
       ? [h('span', { key: 'who', className: 'bt-wg-line-who' }, `${line.who}：`),
-        h('span', { key: 'text' }, ...markMentions(line.text, room.members))]
+        h('span', { key: 'text' }, ...markMentions(line.text, room.members)),
+        // The line's own files, as buttons. A line with files carries them on `attachments`; the
+        // text already names them, so this is the part that actually fetches.
+        ...(Array.isArray(line.attachments) && line.attachments.length > 0
+          ? [h('span', { key: 'files', className: 'bt-wg-line-files' },
+            line.attachments.map((attachment, index) => h(AttachmentLink, { key: index, attachment })))]
+          : [])]
       : h('span', { className: 'bt-wg-line-note' }, `[${line.who}] ${line.kind}`)
-    return h('div', { key: line.seq, className: 'bt-wg-line', 'data-kind': line.kind ?? 'message' }, body)
+    return h('div', {
+      key: line.seq,
+      className: 'bt-wg-line',
+      'data-kind': line.kind ?? 'message',
+      // A line that crossed the Hub is marked as such: it is what tells the reader that the
+      // message came from another machine, and it is the only place that fact is visible.
+      ...(line.via === 'hub' ? { 'data-via': 'hub', 'data-hub-seq': String(line.hubSeq ?? '') } : {}),
+    }, body)
   })
+
   return h('div', { className: 'bt-wg-chat' },
     h('div', { className: 'bt-wg-chat-head' },
       // The same identity the local-group header shows: the group's member avatars, then
@@ -249,8 +507,21 @@ function ChatPane({ roomId, roster }) {
       room.linkedLocalName
         ? h('span', { className: 'bt-wg-chat-sub' }, t('Upgraded from {name}', { name: room.linkedLocalName }))
         : null),
+    // A room that was upgraded away from this machine: the pane says so once, above the log, and
+    // the composer refuses below. Both read the same fact.
+    room.archived
+      ? h('div', { className: 'bt-wg-archived', role: 'note', 'data-archived': 'true' },
+        t('Archived: this local group was upgraded to a workgroup. Its history stays readable here and is not shared.'))
+      : null,
+    h(MemberList, { hub: room.hub ?? null, members, onInvite: () => void openWorkgroup(roomId) }),
     h('div', { className: 'bt-wg-log' }, lines),
-    h(Composer, { roomId, onSent: () => void openWorkgroup(roomId) }),
+    h(Composer, {
+      roomId,
+      hub: room.hub ?? null,
+      archived: room.archived === true,
+      onSent: () => void openWorkgroup(roomId),
+    }),
+    h(HubLine, { hub: room.hub ?? null }),
     h(ConnectionLine, null))
 }
 
@@ -262,6 +533,72 @@ const ensureStyles = () => {
   stylesInstalled = true
   installStyles(WG_CSS, 'workgroup')
 }
+
+// Invites addressed to this account.
+//
+// Without this the product had no way to JOIN a group: the host could answer an invite, but nothing
+// in the UI ever showed one, so a second machine could never be added. It sits at the top of the
+// panel rather than in a modal, because an invite is a thing a person ignores for a day.
+function InviteInbox({ onChanged }) {
+  const [invites, setInvites] = useState([])
+  const [busy, setBusy] = useState(null)
+  const [note, setNote] = useState(null)
+
+  const load = useCallback(async () => {
+    try {
+      const answer = await callWorkgroup('group-invites')
+      setInvites(answer.incoming ?? [])
+    } catch {
+      // A Hub that is down is not an error worth a banner here: `ConnectionLine` already says so.
+      setInvites([])
+    }
+  }, [])
+  useEffect(() => { void load() }, [load])
+
+  if (invites.length === 0) return null
+  const answer = async (invite, accept) => {
+    setBusy(invite.inviteId)
+    setNote(null)
+    try {
+      await callWorkgroup('answer-invite', { inviteId: invite.inviteId, accept })
+      await load()
+      onChanged?.()
+    } catch (error) {
+      setNote(error?.message ?? String(error))
+    } finally {
+      setBusy(null)
+    }
+  }
+  return h('div', { className: 'bt-wg-inbox', role: 'region', 'aria-label': t('Invitations'), 'data-invites': String(invites.length) },
+    h('div', { className: 'bt-wg-roster-head' }, t('Invitations')),
+    invites.map(invite => h('div', { key: invite.inviteId, className: 'bt-wg-invite-row', 'data-invite': invite.inviteId },
+      h('span', { className: 'bt-wg-invite-name' }, invite.groupName || t('Unnamed workgroup')),
+      h('span', { className: 'bt-wg-invite-from' }, invite.invitedByPhoneMasked ?? ''),
+      h('button', {
+        type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy === invite.inviteId,
+        onClick: () => void answer(invite, true),
+      }, t('Join')),
+      h('button', {
+        type: 'button', className: 'bt-soft bt-soft-sm bt-danger', disabled: busy === invite.inviteId,
+        onClick: () => void answer(invite, false),
+      }, t('Decline')))),
+    note === null ? null : h('div', { className: 'bt-wg-note', role: 'status' }, note))
+}
+
+// The approval cards: work another person asked B to do (plan §10.1 step 3).
+//
+// This is the one screen in the product that grants somebody else's work the right to run on this
+// machine, so it is deliberately plain:
+//   * it appears only for requests addressed to THIS account, because the host only records those;
+//   * it names the person, the group and what was asked for, in the words the requester used;
+//   * "Approve" asks which Bot runs it, and offers the three ways the plan names --- an existing
+//     Bot, the Chief picking one, or a new Bot for this task;
+//   * "Decline" is a first-class answer, not a hidden menu item.
+//
+// Nothing here is a capability: the host writes the local ledger after the Hub agrees, and the tool
+// guard enforces it. A card left unanswered runs nothing at all.
+// `ApprovalCards` lives in ./tasks.js now: the group settings drawer shows the same cards, and one
+// component means the two places cannot drift apart.
 
 // The panel itself. It reaches the host only through ./api.js, never into the shell.
 export function BotPanel({ roster } = {}) {
@@ -318,11 +655,12 @@ export function BotPanel({ roster } = {}) {
       h('div', { className: 'bt-wg-head' },
         h('span', { className: 'bt-wg-title' }, t('Workgroups')),
         h('span', { className: 'bt-wg-count' }, String(rooms.length))),
-      // G3 交付水位：工作群界面已可用，跨用户群聊与消息属 G4。标注必须显眼，
-      // 并且不能让人把"还不能用"误判成"坏了"。
-      h('div', { className: 'bt-wg-unfinished', role: 'note' },
-        t('Not finished: workgroup chat and messages are not available yet.')),
+      // The G3 notice ("workgroup chat and messages are not available yet") used to sit here.
+      // G4 delivered both, so it is gone: the panel now reports what it can actually do — see
+      // `BridgeLine` below, which shows a measured Hub connection rather than a promise.
       state.error !== null ? h('div', { className: 'bt-wg-error', role: 'alert' }, state.error) : null,
+      h(InviteInbox, { onChanged: () => void refreshWorkgroups() }),
+      h(ApprovalCards, { onChanged: () => void refreshWorkgroups() }),
       h('div', { className: 'bt-wg-list', role: 'list', 'aria-label': t('Workgroups') }, list)),
     h('div', { className: 'bt-wg-main' },
       h(ChatPane, { roomId: selected, roster })))

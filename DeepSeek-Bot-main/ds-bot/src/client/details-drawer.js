@@ -7,6 +7,10 @@ import { GlobeIcon, Favicon } from './browser-pane.js'
 import { useEscape } from './overlay-hooks.js'
 import { BotSettingsForm } from './bot-settings.js'
 import { GroupSettingsForm, ROOM_MODES, roomSubtitle, shownMode } from './group-settings.js'
+// The workgroup domain's own copy of the settings form (plan §5.1). A workgroup gets it because the
+// original knows nothing about inviting a person or about work waiting for approval; a local group
+// keeps the original, unchanged.
+import { GroupSettingsForm as WorkgroupGroupSettingsForm } from '../workgroup/client/group-settings.js'
 import { ModelMenu, modelOf } from './model-menu.js'
 import { FolderMenu } from './folder-menu.js'
 import { MemoryRow } from './memory-panel.js'
@@ -215,7 +219,12 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
         h('span', { className: 'bt-subhead-title' }, bot ? t('Settings') : t('Group settings')),
         hasStrip ? null : h('button', { type: 'button', className: 'bt-icon-btn', 'aria-label': t('Close details'), onClick: close }, h(CloseIcon))),
       h('div', { key: 'set-body', className: 'bt-drawer-body bt-set-body', 'data-move': move }, errorLine,
-        bot ? h(BotSettingsForm, { bot, roster, actions, run }) : h(GroupSettingsForm, { room, roster, actions, run, onDeleted: close })),
+        bot ? h(BotSettingsForm, { bot, roster, actions, run })
+          // `room.workgroup` is set by the roster index on the workgroup domain's copies only
+          // (src/client/sources.js), so an original room cannot take this branch.
+          : room.workgroup === true
+            ? h(WorkgroupGroupSettingsForm, { room, roster, actions, run, onDeleted: close })
+            : h(GroupSettingsForm, { room, roster, actions, run, onDeleted: close })),
     ]
   }
   const top = h('div', { className: 'bt-drawer-top', 'data-move': side },
