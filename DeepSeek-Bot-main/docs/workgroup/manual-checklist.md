@@ -96,7 +96,7 @@
 
 | 项 | 说明 |
 |---|---|
-| Hub 绑定 | 同一局域网要连，Hub 必须监听 `0.0.0.0`：`HUB_HOST=0.0.0.0 HUB_ALLOW_PLAINTEXT_LAN=1 npm start`。**未设该开关会直接启动失败**，而不是像旧版本那样静默改回 `127.0.0.1`。若配了 TLS 证书则不需要这个开关 |
+| Hub 绑定 | 同一局域网要连，Hub 必须监听 `0.0.0.0`：`HUB_ALLOW_INSECURE_LOCALHOST=1 HUB_ALLOW_PLAINTEXT_LAN=1 HUB_HOST=0.0.0.0 npm start`。**两个开关缺一不可**：只设前者仍然只听 `127.0.0.1`（局域网连不上），只设后者会直接启动失败；未设 `HUB_ALLOW_PLAINTEXT_LAN` 也不会像旧版本那样静默改回 `127.0.0.1`，而是启动报错。若配了 TLS 证书则两个开关都不需要。详见 `hub/README.md` 的「Serving the LAN」一节 |
 | 两台机器 | A 与 B，都能访问 Hub 的局域网地址（不是 `127.0.0.1`） |
 | 两个账号 | 不同手机号。**B 必须在同一 Hub 上先注册**，否则 A 邀请时会得到 `workgroup/invitee-unknown` |
 | 登录 | 两台都先在「设置 → Hub 账号」登录。**未登录不能建工作群**（会提示先登录） |

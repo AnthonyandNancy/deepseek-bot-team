@@ -311,7 +311,7 @@ git status --porcelain ds-bot/src/host/              # 必须为空
 
 **多机验收步骤（改写后）**
 
-1. Hub：`HUB_HOST=0.0.0.0 HUB_ALLOW_PLAINTEXT_LAN=1 npm start`（或配 TLS）
+1. Hub：`HUB_ALLOW_INSECURE_LOCALHOST=1 HUB_ALLOW_PLAINTEXT_LAN=1 HUB_HOST=0.0.0.0 npm start`（或配 TLS，此时两个开关都不需要）
 2. A、B 各自登录不同手机号（B 须先注册）
 3. A 新建工作群 → 群已在 Hub 上
 4. A 打开该群 → 齿轮 → 群设置 → 「添加成员」下方「邀请同事」→ 填 B 的手机号或用户 ID
