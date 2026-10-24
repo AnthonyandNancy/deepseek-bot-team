@@ -1,3 +1,9 @@
+> **⚠️ 已被 G6R 否决（2026-10-24）。** 本文件记录的是被否决的 G6 方案：它在 Hub 新建了
+> `group_memories` 存储、`memory-*` 端点和独立记忆 UI，而原版 `memory.js` 已有群记忆引擎。
+> 这里的“通过”只说明那套平行实现在自己的测试里自洽，**不是有效的阶段门禁**。
+> 现行方案见 [`docs/superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md`](../../superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md)
+> 与 [`docs/workgroup/g6r/NEXT-INSTRUCTION.md`](../g6r/NEXT-INSTRUCTION.md)。
+
 # G6 轮次日志
 
 - 分支：`feat/g6-group-memory`
