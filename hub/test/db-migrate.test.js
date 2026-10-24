@@ -77,7 +77,7 @@ test('the G3 tables exist and the deliberately absent one does not', (t) => {
   assert.equal(names.includes('otp_challenges'), false, 'otp_challenges must not exist')
 })
 
-test('the G4 and G5 tables exist and the G6 one does not', (t) => {
+test('the G4, G5 and G6 tables all exist', (t) => {
   const { db } = withDatabase(t)
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(row => row.name)
 
@@ -88,12 +88,11 @@ test('the G4 and G5 tables exist and the G6 one does not', (t) => {
     // that phase added, and the previous phase's "must not exist yet" line is replaced rather than
     // left behind to fail.
     'tasks', 'approvals', 'round_leases', 'artifacts',
+    // G6 (migration 8): the shared store and its audit trail landed here.
+    'group_memories', 'group_memory_events', 'group_memories_fts',
   ]) {
     assert.ok(names.includes(table), `${table} should exist`)
   }
-  // G6 (group memories) is still out of scope. A table nothing writes to would read as "already
-  // done" to whoever picks up the next phase.
-  assert.equal(names.includes('group_memories'), false, 'group_memories belongs to G6')
 })
 
 test('a phone number and a device key are each unique where they must be', (t) => {
