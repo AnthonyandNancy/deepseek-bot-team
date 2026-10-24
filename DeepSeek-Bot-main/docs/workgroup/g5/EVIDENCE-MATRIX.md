@@ -142,6 +142,12 @@
 | 进度事件被节流 | 2 秒窗口内五次工具调用只落 1 条事件 | `workgroup-task.test.js` → `the progress report is merged…`：向 `session/event` 发 5 次 `tool/call`，断言 `task.progress` 事件数为 1、`payload.note` 为工具名 | PASS |
 | 未知结果时不盲目重跑 | 由 `taskId` 幂等 + 状态机共同保证：`duplicate` 不重复 append、不重复 fan-out | Hub `tasks.request()` 的 `existing` 分支直接返回已存行；`task-approval.test.js` 断言重复批准不新增 grant | PASS |
 | 副作用后 ack 丢失再重连 | 拉回的是同一条事件（`eventId` 主键），不是新的一条 | G4 已证（`ws-events.test.js`）；G5 的任务事件复用它同一条链路 | PASS |
+| **任务已开始并产生副作用后，start 重放** | 第二次 `runTask` 不再次提示 Bot；同一 `runId` | `workgroup-task.test.js` → `starting the same approved task twice delivers it once`：两次调用后 `__delivered.length === 1`，`state === 'RUNNING'`，`runId` 相同 | PASS（2026-10-25 补） |
+| **进程重启时任务仍为 RUNNING** | 重建索引即 `INTERRUPTED`，不自动重放；只有用户显式 start 才开启新 run | `workgroup-task.test.js` → `a restart while RUNNING marks the task interrupted and never replays it`：`indexTasks()` 后状态为 `INTERRUPTED`，投递数不变；显式 start 产生新 `runId` 且仅一次新投递 | PASS（2026-10-25 补） |
+| **同一 `RUNNING` 报告因 ACK 丢失重发** | 幂等接受，不新增版本、不重复写 `task.started` | `hub/test/task-approval.test.js` → `a replayed RUNNING report is an idempotent acknowledgement` | PASS（2026-10-25 补） |
+| **同态报告携带旧版本** | 仍拒绝，不能借同态绕过 compare-and-apply | `hub/test/task-approval.test.js` → `a same-state report still cannot use a stale version`：返回 `task/version-conflict` | PASS（2026-10-25 补） |
+
+> **口径修正（2026-10-25）**：此前 T17 只证明了「同一 `taskId` 重投不重复建任务」，那是**请求幂等**；本表上面新增的行才覆盖**已开始任务的副作用幂等**。两者不是同一件事，不能互相替代。
 
 ---
 

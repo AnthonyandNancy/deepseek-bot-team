@@ -70,6 +70,22 @@
 
 ---
 
+## G4 修补轮（2026-10-25）：协调者重启与设置版本
+
+这两项属于 G4 已交付范围的可靠性缺口，不是新阶段。
+
+| 步骤 | 期待 | 实际（自动化） | 结论 |
+|---|---|---|---|
+| 远端调用已发出，协调者进程被替换 | 远端槽位仍以开放义务存在，exchange 不变 | `ds-bot/test-realtime/workgroup-realtime.test.js` → `a remote slot survives a coordinator restart as an open obligation`：真实 relay + 同 home 新 runtime，`roundOf(...).state === 'open'`，槽位 exchange 保留 | PASS |
+| 进程在「调用已可被 Hub 看到」与「本地记录 exchange」之间死亡 | exchange 必须已落盘 | 同一文件 → `a remote call writes its exchange to disk before it can reach the Hub`：在 `deliverRemote` 缝内同步读 `state.json`，槽位已有 exchange | PASS |
+| 重启后同事的 Bot 在旧 exchange 下答复 | 答复只出现一次，槽位变 `posted`，不启动第二个 relay、不重派成员 | 同一文件 → `a recovered waiting slot is continued by the matching Hub answer, once`：自动 `hello`/`sync.batch` 触发；断言 1 行、`exchangeId`/`hubEventId`、`post`、`deliverRemote` 0 次、relay 执行 0 次 | PASS |
+| 两台机器并发保存群设置，其中一台基于旧版本 | 旧写入被 Hub 409 拒绝；旧响应也不能覆盖新房间 | `hub/test/workgroup-settings.test.js` 3 项 + 同文件 → `an older settings snapshot cannot overwrite a newer room` | PASS |
+| 用户 Stop 后协调者重启 | 记录仍为 `stopped`；迟到答复只记日志，不继续轮次 | 同一文件 → `a stopped round stays stopped after a coordinator restart` | PASS |
+
+**未改变的水位**：双机实时、视觉对照、Electron 冷启动仍是人工 BLOCKED，见 `manual-checklist.md`。
+
+---
+
 ## T19 Bot UI 与原版视觉对照
 
 - 结论：**BLOCKED**，只能人工。
