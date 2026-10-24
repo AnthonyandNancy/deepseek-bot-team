@@ -160,3 +160,132 @@ test('memory events fan out on the existing sequence without counting as unread'
   const after = await hub.get(`/v1/workgroups/${workgroupId}`, { token: bob.token })
   assert.equal(after.body.unreadCount, before.body.unreadCount, 'memory is not an unread chat message')
 })
+
+test('a member who left stops reading and searching immediately', async (t) => {
+  const { hub, alice, bob, workgroupId } = await memoryScene(t)
+  const created = await createMemory(hub, alice, workgroupId, { acl: [bob.userId] })
+  assert.equal(created.status, 201, JSON.stringify(created.body))
+  const bobMembership = await membershipOf(hub, bob, workgroupId)
+  assert.ok(bobMembership !== undefined)
+  const left = await hub.post(`/v1/workgroups/${workgroupId}/members/${bobMembership.membershipId}/leave`, {}, { token: bob.token })
+  assert.equal(left.status, 200, JSON.stringify(left.body))
+
+  const list = await hub.get(`/v1/workgroups/${workgroupId}/memories`, { token: bob.token })
+  assert.equal(list.status, 404)
+  assert.equal(list.body.error.code, 'workgroup/not-found')
+  const search = await hub.get(`/v1/workgroups/${workgroupId}/memories/search?q=budget`, { token: bob.token })
+  assert.equal(search.status, 404)
+  assert.equal(search.body.error.code, 'workgroup/not-found')
+  // Alice, still a member, keeps reading the same row; leaving changed Bob's access, not the data.
+  const still = await hub.get(`/v1/workgroups/${workgroupId}/memories`, { token: alice.token })
+  assert.equal(still.body.memories.some(entry => entry.memoryId === created.body.memory.memoryId), true)
+})
+
+test('group deletion removes the Hub memory and audit rows, and a stale client cannot read them', async (t) => {
+  const { hub, alice, workgroupId } = await memoryScene(t)
+  const created = await createMemory(hub, alice, workgroupId)
+  assert.equal(created.status, 201, JSON.stringify(created.body))
+  const memoryId = created.body.memory.memoryId
+  const deleted = await hub.post(`/v1/workgroups/${workgroupId}/delete`, {}, { token: alice.token })
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.body))
+
+  const after = await hub.get(`/v1/workgroups/${workgroupId}/memories`, { token: alice.token })
+  assert.equal(after.status, 404, 'the group is gone for every member')
+  assert.equal(hub.hub.db.prepare('SELECT count(*) AS c FROM group_memories WHERE id = ?').get(memoryId).c, 0)
+  assert.equal(hub.hub.db.prepare('SELECT count(*) AS c FROM group_memory_events WHERE memory_id = ?').get(memoryId).c, 0)
+})
+
+test('the same memory is readable after reopening the same database file, and only by the same members', async (t) => {
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { createHub } = await import('../src/server.js')
+  const { createMemoryLogger } = await import('../src/log.js')
+  const dataDir = mkdtempSync(join(tmpdir(), 'hub-g6-restart-'))
+  const config = {
+    host: '127.0.0.1', port: 0, tls: null, allowInsecure: true, insecureLoopbackOnly: true, dataDir,
+    accessTtlMs: 30 * 60 * 1000, refreshTtlMs: 24 * 60 * 60 * 1000, logLevel: 'error',
+  }
+  const open = async () => {
+    const hub = createHub({ config, logger: createMemoryLogger().logger })
+    const address = await hub.listen()
+    const base = `http://127.0.0.1:${address.port}`
+    return { hub, base, config }
+  }
+  const first = await startHub({ dataDir })
+  // `startHub.close()` deletes the data directory, which would make this test reopen an empty
+  // database. The test owns the directory and removes it below.
+  first.close = async () => { await first.hub.close() }
+  let second
+  t.after(async () => {
+    await second?.close().catch(() => {})
+    await first.close().catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 50))
+    rmSync(dataDir, { recursive: true, force: true, maxRetries: 5 })
+  })
+  const alice = await person(first, { phone: PHONE_A, name: 'Alice' })
+  const bob = await person(first, { phone: PHONE_B, name: 'Bob' })
+  const { workgroupId } = await groupWith(first, { owner: alice, others: [bob] })
+  const created = await first.post(`/v1/workgroups/${workgroupId}/memories`, {
+    type: 'fact', content: 'The budget closes on the 25th.', sourceRefs: [], acl: [bob.userId],
+  }, { token: alice.token })
+  assert.equal(created.status, 201, JSON.stringify(created.body))
+  const memoryId = created.body.memory.memoryId
+  await first.close()
+
+  second = await startHub({ dataDir })
+  second.close = async () => { await second.hub.close() }
+  const alicesSecond = await second.post('/v1/auth/login', { phone: PHONE_A, password: PASSWORD })
+  const bobsSecond = await second.post('/v1/auth/login', { phone: PHONE_B, password: PASSWORD })
+  assert.equal(alicesSecond.status, 200, JSON.stringify(alicesSecond.body))
+  assert.equal(bobsSecond.status, 200, JSON.stringify(bobsSecond.body))
+  const listed = await second.get(`/v1/workgroups/${workgroupId}/memories`, { token: bobsSecond.body.accessToken })
+  assert.equal(listed.status, 200)
+  assert.equal(listed.body.memories.some(entry => entry.memoryId === memoryId), true)
+  const found = await second.get(`/v1/workgroups/${workgroupId}/memories/search?q=budget`, { token: bobsSecond.body.accessToken })
+  assert.equal(found.status, 200)
+  assert.equal(found.body.memories.some(entry => entry.memoryId === memoryId), true)
+
+  const bobMembership = await membershipOf(second, { ...bob, token: bobsSecond.body.accessToken }, workgroupId)
+  const left = await second.post(`/v1/workgroups/${workgroupId}/members/${bobMembership.membershipId}/leave`, {}, { token: bobsSecond.body.accessToken })
+  assert.equal(left.status, 200, JSON.stringify(left.body))
+  const denied = await second.get(`/v1/workgroups/${workgroupId}/memories`, { token: bobsSecond.body.accessToken })
+  assert.equal(denied.status, 404)
+  const deniedSearch = await second.get(`/v1/workgroups/${workgroupId}/memories/search?q=budget`, { token: bobsSecond.body.accessToken })
+  assert.equal(deniedSearch.status, 404)
+})
+
+
+test('replaying the same memory.created event does not create a second entry', async (t) => {
+  const { hub, alice, workgroupId } = await memoryScene(t)
+  const body = {
+    type: 'fact', content: 'The budget closes on the 25th.', sourceRefs: [], acl: [], eventId: 'evt_memory_replay_1',
+  }
+  const first = await hub.post(`/v1/workgroups/${workgroupId}/memories`, body, { token: alice.token })
+  assert.equal(first.status, 201, JSON.stringify(first.body))
+  const again = await hub.post(`/v1/workgroups/${workgroupId}/memories`, body, { token: alice.token })
+  assert.equal(again.status, 200, JSON.stringify(again.body))
+  assert.equal(again.body.duplicate, true)
+  assert.equal(again.body.memory.memoryId, first.body.memory.memoryId)
+
+  const listed = await hub.get(`/v1/workgroups/${workgroupId}/memories`, { token: alice.token })
+  assert.equal(listed.body.memories.filter(entry => entry.memoryId === first.body.memory.memoryId).length, 1)
+  assert.equal(hub.hub.db.prepare('SELECT count(*) AS c FROM group_memories WHERE id = ?').get(first.body.memory.memoryId).c, 1)
+  assert.equal(hub.hub.db.prepare('SELECT count(*) AS c FROM group_memory_events WHERE id = ?').get('memev_evt_memory_replay_1').c, 1)
+})
+
+test('group memory search never returns another group or a local private/team marker', async (t) => {
+  const { hub, alice, bob, workgroupId } = await memoryScene(t)
+  const other = await groupWith(hub, { owner: alice, others: [bob] })
+  const mine = await createMemory(hub, alice, workgroupId, { content: 'GROUP_ONLY_7c1a budget closes' })
+  const elsewhere = await createMemory(hub, alice, other.workgroupId, { content: 'OTHER_GROUP_9b2f budget closes' })
+  assert.equal(mine.status, 201, JSON.stringify(mine.body))
+  assert.equal(elsewhere.status, 201, JSON.stringify(elsewhere.body))
+
+  const found = await hub.get(`/v1/workgroups/${workgroupId}/memories/search?q=budget`, { token: alice.token })
+  assert.equal(found.status, 200)
+  assert.deepEqual(found.body.memories.map(entry => entry.memoryId), [mine.body.memory.memoryId])
+  assert.equal(JSON.stringify(found.body).includes('PRIVATE_ONLY_MARKER'), false)
+  assert.equal(JSON.stringify(found.body).includes('TEAM_ONLY_MARKER'), false)
+  assert.equal(found.body.memories.some(entry => entry.memoryId === elsewhere.body.memory.memoryId), false)
+})

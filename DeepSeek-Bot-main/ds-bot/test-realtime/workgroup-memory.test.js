@@ -64,3 +64,29 @@ test('the five memory endpoints use the same workgroup API as the panel', async 
   assert.equal(deleted.ok, true, JSON.stringify(deleted.error))
   assert.deepEqual((await alice.call('memory-list', { workgroupId })).value.memories, [])
 })
+
+test('a correction and a deletion from one machine reach the other projection', async (t) => {
+  const { alice, bob, workgroupId } = await invitedPair(t)
+  const bobAccount = await bob.wg.hub.restore()
+  const created = await alice.call('memory-create', {
+    workgroupId, type: 'decision', content: 'Deploy uses the blue green switch', sourceRefs: [],
+    acl: [bobAccount.hubUserId],
+  })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+  const memoryId = created.value.memory.memoryId
+  await until(() => (bob.wg.state.memories?.[workgroupId]?.entries ?? []).some(entry => entry.memoryId === memoryId),
+    { label: "Bob's projection to receive the creation" })
+
+  const corrected = await alice.call('memory-correct', {
+    workgroupId, memoryId, content: 'Deploy uses a canary switch', expectedVersion: 1,
+  })
+  assert.equal(corrected.ok, true, JSON.stringify(corrected.error))
+  await until(() => (bob.wg.state.memories?.[workgroupId]?.entries ?? [])
+    .some(entry => entry.memoryId === memoryId && entry.version === 2 && entry.content.includes('canary')),
+  { label: "Bob's projection to receive the correction" })
+
+  const deleted = await bob.call('memory-delete', { workgroupId, memoryId, expectedVersion: 2 })
+  assert.equal(deleted.ok, true, JSON.stringify(deleted.error))
+  await until(() => !(alice.wg.state.memories?.[workgroupId]?.entries ?? []).some(entry => entry.memoryId === memoryId),
+    { label: "Alice's projection to receive the deletion" })
+})

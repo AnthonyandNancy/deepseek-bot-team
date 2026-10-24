@@ -379,11 +379,14 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
   })
   router.post('/v1/workgroups/:id/memories', async ({ params, body, headers }) => {
     const session = caller(headers)
-    return created(await memories.create({
+    const result = await memories.create({
       userId: session.user_id, workgroupId: params.id,
       type: body?.type, content: body?.content, sourceRefs: body?.sourceRefs,
-      acl: body?.acl, expiresAt: body?.expiresAt,
-    }))
+      acl: body?.acl, expiresAt: body?.expiresAt, eventId: body?.eventId,
+    })
+    // A replay is not a new resource: 200 with the stored row and `duplicate: true`, mirroring the
+    // event log's idempotent answer. A first call is still 201.
+    return result.duplicate === true ? result : created(result)
   })
   router.post('/v1/workgroups/:id/memories/:memoryId/correct', async ({ params, body, headers }) => {
     const session = caller(headers)

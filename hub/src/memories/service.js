@@ -33,6 +33,7 @@ export function createMemoryService({ db, audit, now = () => Date.now(), events,
     WHERE workgroup_id = ? AND member_type = 'user' AND user_id = ? AND status = 'active'`)
   const groupExists = stmt('SELECT id FROM workgroups WHERE id = ?')
   const byId = stmt('SELECT * FROM group_memories WHERE id = ? AND workgroup_id = ?')
+  const auditByEvent = stmt('SELECT * FROM group_memory_events WHERE id = ? AND workgroup_id = ?')
   const insertMemory = stmt(`INSERT INTO group_memories
     (id, workgroup_id, type, content, source_refs, acl, version, created_by, created_at, updated_at, expires_at, deleted_at)
     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL)`)
@@ -180,7 +181,7 @@ export function createMemoryService({ db, audit, now = () => Date.now(), events,
   }
 
   const service = {
-    create({ userId, workgroupId, type, content, sourceRefs, acl, expiresAt }) {
+    create({ userId, workgroupId, type, content, sourceRefs, acl, expiresAt, eventId }) {
       requireMember(workgroupId, userId)
       const normalizedType = normalizeType(type)
       const normalizedContent = normalizeContent(content)
@@ -188,6 +189,17 @@ export function createMemoryService({ db, audit, now = () => Date.now(), events,
       const users = normalizeAcl(workgroupId, userId, acl)
       const expiry = normalizeExpiry(expiresAt)
       const at = iso()
+      // A memory.create that carries an event id is idempotent: the audit row's primary key is the
+      // dedup key, so a retried Hub request cannot produce a second entry. The caller never names a
+      // row id directly; it only proves "this is the same request again".
+      const replayId = typeof eventId === 'string' && /^[\w-]{1,128}$/.test(eventId) ? `memev_${eventId}` : undefined
+      if (replayId !== undefined) {
+        const previous = auditByEvent.get(replayId, workgroupId)
+        if (previous !== undefined) {
+          const existing = byId.get(previous.memory_id, workgroupId)
+          if (existing !== undefined) return { memory: publicMemory(existing), duplicate: true }
+        }
+      }
       const id = newId('mem')
       db.exec('BEGIN')
       let row
@@ -195,14 +207,22 @@ export function createMemoryService({ db, audit, now = () => Date.now(), events,
         insertMemory.run(id, workgroupId, normalizedType, normalizedContent, JSON.stringify(refs),
           JSON.stringify(users), userId, at, at, expiry)
         row = byId.get(id, workgroupId)
-        insertAudit.run(newId('memev'), id, workgroupId, 'created', row.version, null,
+        insertAudit.run(replayId ?? newId('memev'), id, workgroupId, 'created', row.version, null,
           JSON.stringify(publicMemory(row)), userId, at)
         db.exec('COMMIT')
       } catch (error) {
         try { db.exec('ROLLBACK') } catch { /* already gone */ }
+        if (replayId !== undefined) {
+          const winner = auditByEvent.get(replayId, workgroupId)
+          if (winner !== undefined) {
+            const existing = byId.get(winner.memory_id, workgroupId)
+            if (existing !== undefined) return { memory: publicMemory(existing), duplicate: true }
+          }
+        }
         throw error
       }
-      return appendEvent({ row, action: 'created', actorId: userId })
+      const appended = appendEvent({ row, action: 'created', actorId: userId })
+      return { ...appended, duplicate: false }
     },
 
     correct({ userId, workgroupId, memoryId, content, sourceRefs, acl, expectedVersion }) {
