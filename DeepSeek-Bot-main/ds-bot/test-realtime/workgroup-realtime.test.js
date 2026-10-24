@@ -79,11 +79,11 @@ async function withHub(t) {
   return { hub, baseUrl }
 }
 
-async function machine(t, { baseUrl, phone, team, name = 'machine' }) {
-  const root = mkdtempSync(join(tmpdir(), `ds-bot-wg-realtime-${name}-`))
-  const home = join(root, 'bot')
-  mkdirSync(home, { recursive: true })
-  writeFileSync(join(home, 'state.json'), JSON.stringify(team))
+// Starts a machine on an existing home. A coordinator restart is the same call with the same `home`:
+// the workgroup state file and the Hub cursor survive, while every in-memory waiter, AbortController
+// and round object does not. A test that needs a restart must use this seam rather than hand-writing
+// the projection the product is expected to persist.
+async function openMachine(t, { baseUrl, phone, home, root, name = 'machine' }) {
   const ctx = fakeContext()
   const routes = {}
   const registerRoute = ctx.connection.fetch.register
@@ -128,13 +128,21 @@ async function machine(t, { baseUrl, phone, team, name = 'machine' }) {
   t.after(async () => {
     await rt.workgroup?.bridge?.stop?.().catch?.(() => {})
     await ctx.dispose()
-    rmSync(root, { recursive: true, force: true, maxRetries: 5 })
+    if (root !== undefined) rmSync(root, { recursive: true, force: true, maxRetries: 5 })
   })
   const wg = rt.workgroup
   const call = (endpoint, payload) => wg.apiHandle(endpoint, payload)
   const signedIn = await call('hub-login', { baseUrl, phone, password: PASSWORD })
   assert.equal(signedIn.ok, true, `sign-in failed: ${JSON.stringify(signedIn.error)}`)
-  return { rt, wg, call, routes, followups }
+  return { rt, wg, call, routes, followups, home, ctx }
+}
+
+async function machine(t, { baseUrl, phone, team, name = 'machine' }) {
+  const root = mkdtempSync(join(tmpdir(), `ds-bot-wg-realtime-${name}-`))
+  const home = join(root, 'bot')
+  mkdirSync(home, { recursive: true })
+  writeFileSync(join(home, 'state.json'), JSON.stringify(team))
+  return openMachine(t, { baseUrl, phone, home, root, name })
 }
 
 async function until(predicate, { timeoutMs = 8000, label = 'condition' } = {}) {
@@ -640,4 +648,79 @@ test('a Bot line with an unresolved endpoint never falls back to the owner phone
   assert.equal(line.memberId, 'ep_not_in_the_roster', 'it is attributed to the Bot endpoint, not a resolved person')
   assert.doesNotMatch(String(line.who), /\d{3}/, `a Bot never shows a phone: ${JSON.stringify(line)}`)
   assert.equal(line.who, 'Chief', 'the published Bot name from the line wins over the account row')
+})
+
+
+// 9. A REMOTE SLOT IS AN OBLIGATION, NOT A PROCESS-LOCAL PROMISE.
+//
+// A round waiting on another machine holds an exchange id in memory. If the coordinator process is
+// replaced, the Hub still has the call and the colleague's Bot may still answer, but the new process
+// has nothing that says what to do with that answer. The projection must be written before the wait
+// and read after a restart, while the Hub stays the authority for whether the answer exists.
+test('a remote slot survives a coordinator restart as an open obligation', async (t) => {
+  const { baseUrl } = await withHub(t)
+  const alice = await machine(t, { baseUrl, phone: ALICE, team: ALICE_TEAM, name: 'persist-alice' })
+  const bob = await machine(t, { baseUrl, phone: BOB, team: BOB_TEAM, name: 'persist-bob' })
+  await until(() => alice.wg.bridge.status().connected && bob.wg.bridge.status().connected, { label: 'both sockets' })
+  const created = await alice.call('create-room', {
+    name: '轮次持久化',
+    members: [{ id: 'a', name: 'Chief', kind: 'localBot' }],
+  })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+  const workgroupId = created.value.hub.workgroupId
+  await alice.call('invite-member', { workgroupId, phone: BOB })
+  const incoming = await bob.call('group-invites', {})
+  await bob.call('answer-invite', { inviteId: incoming.value.incoming[0].inviteId, accept: true })
+  await bob.wg.bridge.joinWithPrimaryBot({ workgroupId })
+  const room = roomOf(alice, workgroupId)
+  await until(() => (room.members ?? []).some(member => member.name === 'BobChief'),
+    { label: "BobChief in Alice's roster" })
+  const remote = room.members.find(member => member.name === 'BobChief')
+  assert.equal(room.adminId, 'a', `the owner Bot leads the Hub group: ${JSON.stringify({ adminId: room.adminId, members: room.members })}`)
+
+  // A REAL round, from the relay the product registers. The user names Bob's Bot, so the round's
+  // second slot is a Hub call rather than a local model turn.
+  alice.wg.roomInbox.set(room.id, [{ text: 'please check this', who: 'User' }])
+  const running = alice.rt.ctx.registeredTools.get('workgroup_relay').execute(
+    {}, { agent: { id: room.id }, callId: 'call-round-restart', signal: new AbortController().signal },
+  )
+
+  // The admin (Alice's Chief) speaks first. Its answer names the remote Bot, which selects Bob's
+  // Bot as the next speaker through the copied `callMembers`, exactly as a local group does.
+  let chief
+  await until(() => {
+    chief = [...alice.wg.roomWaiters.values()].find(entry => entry.roomId === room.id && entry.memberId === 'a')
+    return chief !== undefined
+  }, { label: 'the admin turn to start' })
+  const emit = async (event) => {
+    for (const listener of alice.rt.ctx.listeners.get('session/event') ?? []) await listener({ id: chief.sessionId }, event)
+  }
+  await emit({ type: 'turn/start', data: { turn: 1 } })
+  await emit({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '@BobChief please check this' }] } } })
+  await emit({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+
+  let record
+  await until(() => {
+    record = Object.values(alice.wg.state.rounds ?? {}).find(entry => entry.roomId === room.id)
+    return record?.slots?.some(slot => slot.status === 'remote' && typeof slot.exchangeId === 'string')
+  }, { label: 'the remote slot to be persisted' })
+  const expected = record.slots.find(slot => slot.status === 'remote')
+
+  // Replace the process, not the home. Every in-memory round and waiter disappears; the state file
+  // and the Hub account remain, which is what a real coordinator restart looks like.
+  await alice.wg.bridge.stop()
+  await alice.ctx.dispose()
+  const restarted = await openMachine(t, { baseUrl, phone: ALICE, home: alice.home, name: 'persist-alice-restart' })
+  await until(() => restarted.wg.bridge.status().connected, { label: 'the restarted coordinator to reconnect' })
+  await restarted.wg.load()
+
+  const recovered = restarted.wg.roundOf?.(record.roundId)
+  assert.ok(recovered !== undefined, 'the open round survived the coordinator restart')
+  assert.equal(recovered.state, 'open', 'a remote member that has not answered is still an obligation')
+  const slot = recovered.slots.find(entry => entry.exchangeId === expected.exchangeId)
+  assert.ok(slot !== undefined, `the waiting slot kept its exchange: ${JSON.stringify(recovered.slots)}`)
+  assert.equal(slot.status, 'remote', 'and it is still waiting for the answer')
+  // The abandoned round is waiting on a member that will never answer in this test; bound the wait so
+  // the test ends promptly without depending on the product's reply timeout.
+  await Promise.race([running.catch(() => {}), new Promise(resolve => setTimeout(resolve, 100))])
 })

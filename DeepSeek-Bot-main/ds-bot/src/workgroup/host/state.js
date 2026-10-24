@@ -46,6 +46,10 @@ const emptyState = () => ({
   // not in the original's `state.works`, so one domain's hand-offs can never be read as the
   // other's.
   works: {},
+  // roundId -> the obligations of a round that has not finished. Round objects hold signals and
+  // promise resolvers that cannot be serialized; this projection holds only what a restarted
+  // coordinator needs to find the answer on the Hub and decide whether the round may continue.
+  rounds: {},
 })
 
 // Only what this domain understands is kept; an unknown or older shape resets to
@@ -54,7 +58,7 @@ function adopt(raw) {
   if (raw === null || typeof raw !== 'object' || raw.version !== WG_STATE_VERSION) return emptyState()
   const state = emptyState()
   if (Number.isFinite(raw.revision)) state.revision = raw.revision
-  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'endpointBots', 'works']) {
+  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'endpointBots', 'works', 'rounds']) {
     const value = raw[key]
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) state[key] = value
   }

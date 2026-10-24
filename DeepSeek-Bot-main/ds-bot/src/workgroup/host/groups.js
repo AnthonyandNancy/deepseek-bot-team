@@ -1721,6 +1721,11 @@ export function install(wg) {
         const waiter = round.remoteWaiters?.get(payload.exchangeId)
         if (waiter === undefined || waiter.memberId !== memberId) continue
         round.replies.push({ botId: memberId, name, text, time: Date.now() })
+        // The answer is now on disk in the log above; the projection must say the same thing. A
+        // restart between this line and the loop's next `persist` would otherwise recover the slot as
+        // still waiting even though its answer has already arrived.
+        waiter.slot.status = 'posted'
+        wg.persistRound(round)
         waiter.resolve({ text })
         break
       }
@@ -2256,6 +2261,10 @@ export function install(wg) {
   // The earlier version walked `round.slots` once, so a member could never be called again
   // inside a round, and a message typed during a round was handled out of order.
   async function runRound(room, round, signal) {
+    // The projection is updated at the points where the round's OBLIGATION changes: a member starts
+    // working, a remote call is sent, an answer arrives, or a slot ends. A terminal round is removed
+    // instead, because nothing remains to recover.
+    const persist = () => wg.persistRound(round)
     let limit = round.slots.length + WG_EXTRA_TURNS + (room.adminId !== undefined && room.adminId !== null ? WG_ADMIN_EXTRA_TURNS : 0)
     const turns = new Map()
     // COPY OF THE ORIGINAL (`groups.js:415`): the inbox half of the condition keeps a
@@ -2272,6 +2281,7 @@ export function install(wg) {
       // Settings may change mid-round, for example when the admin removes someone.
       if (member === undefined) {
         slot.status = 'left'
+        persist()
         continue
       }
       slot.status = 'speaking'
@@ -2319,6 +2329,7 @@ export function install(wg) {
             text: String(delivered.error?.message ?? delivered.error).slice(0, 300), time: Date.now(),
           })
           round.speaking = null
+          persist()
           continue
         }
         if (delivered?.skipped !== undefined) {
@@ -2333,9 +2344,14 @@ export function install(wg) {
             time: Date.now(),
           })
           round.speaking = null
+          persist()
           continue
         }
         slot.status = 'remote'
+        // The exchange lives on the slot BEFORE the wait begins. A restart can now recover the exact
+        // exchange whose answer closes this slot instead of treating the answer as a new opener.
+        slot.exchangeId = exchangeId
+        persist()
         const answered = await remoteReply
         round.remoteWaiters?.delete(exchangeId)
         round.speaking = null
@@ -2343,12 +2359,14 @@ export function install(wg) {
           slot.status = 'missed'
           round.passed.push(member.name)
           if (answered?.missed === true) round.replies.push({ kind: 'missed', botId: member.id, name: member.name, time: Date.now() })
+          persist()
           continue
         }
         // A member's answer calls only the members it NAMES, exactly as the local `runRound`
         // continuation below does. The exchange has already put the words in the log and the
         // round's replies; this adds the next slot rather than opening a second round.
         slot.status = 'posted'
+        persist()
         const spoken = answered.text
         const leads = room.adminId !== undefined && room.adminId !== null && room.adminId === member.id
         const everyone = room.members ?? []
@@ -2368,11 +2386,13 @@ export function install(wg) {
         slot.status = 'failed'
         round.failed.push(member.name)
         round.replies.push({ kind: 'failed', botId: member.id, name: member.name, code: 'SESSION', text: String(error?.message ?? error).slice(0, 300), time: Date.now() })
+        persist()
         continue
       }
       if (session === undefined) {
         round.speaking = null
         slot.status = 'left'
+        persist()
         continue
       }
       const sessionId = session.id
@@ -2407,6 +2427,7 @@ export function install(wg) {
         round.passed.push(member.name)
         if (reply?.missed) round.replies.push({ kind: 'missed', botId: member.id, name: member.name, time: Date.now() })
       }
+      persist()
       const spoken = final === undefined ? said : [...said, final]
       if (spoken.length === 0) continue
       // Only the admin's "@all" calls everyone, so a member cannot set off a storm.
@@ -2417,6 +2438,16 @@ export function install(wg) {
       const found = named.filter(other => other.id !== member.id)
       const callees = leads && all ? [...found, ...others.filter(other => !found.includes(other))] : found
       callMembers(round, turns, index, callees, `${member.name} mentioned you`, leads ? WG_ADMIN_TURNS_EACH : WG_TURNS_EACH, member.id)
+      persist()
+    }
+    // The loop is over. Only a round with nothing left to wait on is complete; a loop that ended on
+    // its turn budget while a remote slot is still outstanding leaves that slot as an obligation for
+    // Task 2's reconciler. Dropping it here would erase exactly the record the restart needs.
+    const open = (round.slots ?? []).some(slot => slot.status === 'remote' || slot.status === 'speaking')
+    if (open) {
+      wg.persistRound(round)
+    } else {
+      wg.dropRound(round.id)
     }
     await wg.save()
   }
@@ -2544,7 +2575,12 @@ export function install(wg) {
         stopped = true
       }
       round.speaking = null
-      for (const slot of round.slots) if (slot.status === 'speaking' || slot.status === 'waiting') slot.status = 'stopped'
+      for (const slot of round.slots) if (slot.status === 'speaking' || slot.status === 'waiting' || slot.status === 'remote') slot.status = 'stopped'
+      // TERMINAL, NOT DELETED. The round itself is gone with this process, but "the user stopped this
+      // exchange" is a durable fact: a late answer after a restart must be logged and must not resume
+      // the round. Task 5 reads this state; dropping it here would make that answer look unanswered.
+      round.state = 'stopped'
+      wg.persistRound(round)
     }
     if (stopped) appendLine(wg.workgroupOf(roomId), { who: 'User', kind: 'stopped', text: '' })
     await wg.save()
@@ -2725,6 +2761,9 @@ export function install(wg) {
       // A member a Bot's post calls by name works for that Bot.
       const named = opener.botId === undefined ? [] : mentionsIn(opener.text ?? '', room.members ?? []).found
       const round = {
+        // Stable identity for the persisted obligation. It is the same id a remote call already
+        // carries on the wire, so an answer can be matched to this round after a restart.
+        id: `round-${randomUUID()}`,
         roomId: room.id,
         members: room.members,
         startSeq,
@@ -2759,6 +2798,9 @@ export function install(wg) {
       }
       if (posts.some(post => post.resumed || post.stopped || post.done)) await wg.save()
       wg.roomProgress.set(exec.callId, round)
+      // Written BEFORE any member speaks: a remote slot is an obligation, and it must survive the
+      // process that is about to wait on it.
+      wg.persistRound(round)
       // THE COORDINATOR FENCE (plan §9.5).
       //
       // A Hub group may only run an automatic round while this device holds the group's lease, and

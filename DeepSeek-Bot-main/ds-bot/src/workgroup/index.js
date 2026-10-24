@@ -15,6 +15,7 @@ import * as ownership from './host/ownership.js'
 import * as tasks from './host/tasks.js'
 import * as taskRunner from './host/task-runner.js'
 import * as handoffs from './host/handoffs.js'
+import * as roundState from './host/round-state.js'
 import * as groups from './host/groups.js'
 import * as hub from './host/hub.js'
 import * as bridge from './host/bridge.js'
@@ -38,7 +39,7 @@ import * as channel from './host/channel.js'
 // `handoffs` installs BEFORE groups, the same order the original uses (`index.js`: handoffs, then
 // groups): groups calls `closeWork` when a round that a post waited on ends, so the ledger must
 // already exist. It needs only `wg.state` and this domain's maps, so nothing else constrains it.
-const WG_MODULES = [state, ownership, tasks, taskRunner, handoffs, groups, hub, bridge, upgrade, channel]
+const WG_MODULES = [state, ownership, tasks, taskRunner, handoffs, roundState, groups, hub, bridge, upgrade, channel]
 
 export function installWorkgroup(rt) {
   if (rt === undefined || rt === null) throw new Error('ds-bot: installWorkgroup needs the runtime')
