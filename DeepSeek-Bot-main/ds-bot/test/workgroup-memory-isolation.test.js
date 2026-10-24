@@ -64,7 +64,7 @@ test('group memory is not mixed into a Bot view, and private or team memory is n
 })
 
 test('the memory projection survives a local state reload and is never the authority', async (t) => {
-  const { wg, rt, stop } = startRoundFixture()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   await wg.load()
   wg.state.memories = {
