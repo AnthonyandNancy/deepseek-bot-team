@@ -186,28 +186,19 @@ test('a round names only the member an @mention calls', async (t) => {
 })
 
 test('@all calls every member, one at a time', async (t) => {
-  const { wg, answer, beginRound, stop } = startRoundFixture()
+  const { wg, answer, beginRound, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '@all 大家好')
   // A round is serial by design (the original's rule: one member speaks at a time), so
-  // the second member is only called after the first has answered. Wait with timers (which let
-  // the round's own continuations run) rather than a single fixed sleep that a loaded parallel
-  // suite can outrun.
-  const waitForSession = async (memberId) => {
-    const deadline = Date.now() + 5000
-    while (Date.now() < deadline) {
-      const found = wg.workgroupOf(room.id).sessions[memberId]
-      if (found !== undefined) return found
-      await new Promise(resolve => setTimeout(resolve, 25))
-    }
-    return undefined
-  }
-  const first = await waitForSession('bot-a')
-  assert.ok(first !== undefined, 'the admin was called first')
+  // the second member is only called after the first has answered. Wait for the FIRST WAITER,
+  // not just its Session: under parallel load the Session can exist before the answer listener
+  // is registered, and an answer delivered in that window is lost.
+  const first = await untilWaiter('bot-a')
+  assert.ok(wg.workgroupOf(room.id).sessions['bot-a'] !== undefined, 'the admin was called first')
   assert.equal(wg.workgroupOf(room.id).sessions['bot-b'], undefined, 'the others wait their turn')
   await answer(first, '收到')
-  const second = await waitForSession('bot-b')
+  const second = await untilWaiter('bot-b')
   assert.ok(second !== undefined, 'then the other member is called')
   await answer(second, '也收到')
   const result = JSON.parse(await running)
@@ -914,7 +905,7 @@ test('a message typed during the last speaker stays in the same round', async (t
 // message when the round ends, and the work chain it was handed on is closed. The copy
 // dropped the whole block, so a poster never heard anything back.
 test('a round posted with report_back reports back to the Bot that posted it', async (t) => {
-  const { ctx, wg, answer, followups, stop } = startRoundFixture()
+  const { ctx, wg, answer, followups, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'ReportBack', members: twoMembers() })
   wg.registerSessionOwner('relay-session', { kind: 'workgroup', workgroupId: room.id })
@@ -922,13 +913,13 @@ test('a round posted with report_back reports back to the Bot that posted it', a
   const running = ctx.registeredTools.get('workgroup_relay')
     .execute({}, { agent: { id: 'relay-session' }, callId: 'call-rb', signal: new AbortController().signal })
   t.after(() => wg.stopRound(room.id))
-  await new Promise(resolve => setTimeout(resolve, 30))
 
-  // Writer posted it, so Writer never answers its own post; Editor does.
-  const editorSession = wg.workgroupOf(room.id).sessions['bot-b']
+  // Writer posted it, so Writer never answers its own post; Editor does. Wait for the actual
+  // waiter, not a fixed sleep: the Session exists before `roomWaiters.set`, and an answer in that
+  // window is lost (the whole round then waits out the 240 s reply timeout).
+  const editorSession = await untilWaiter('bot-b')
   assert.ok(editorSession !== undefined, 'the other member was called')
   await answer(editorSession, '做完了')
-  await new Promise(resolve => setTimeout(resolve, 40))
   await running
 
   // The report reached the poster's OWN chat, not the workgroup's Session.
