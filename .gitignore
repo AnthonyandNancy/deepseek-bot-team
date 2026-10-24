@@ -4,6 +4,7 @@ node_modules/
 # and the next version that checks its update (see app/README.md).
 /app/ui/dist/
 /app/dist-pack/
+/app/dist-pack-old/
 /app/dist-next/
 
 # A DeepSeek Harness checkout for the tests and the test bench.
@@ -26,3 +27,4 @@ node_modules/
 /docker-compose.override.yml
 test*/
 test/
+/*dist-pack-old*/

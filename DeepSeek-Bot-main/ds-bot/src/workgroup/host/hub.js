@@ -388,7 +388,7 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
     // ── groups ────────────────────────────────────────────────────────────────────
     // One thin method per endpoint, so the bridge holds no URL strings and a Hub route rename
     // cannot leave a stale path in two places.
-    async createWorkgroup({ name, notice, upgradeId, endpointIds }) {
+    async createWorkgroup({ name, notice, upgradeId, endpointIds, leadEndpointId }) {
       const token = await ensureAccess()
       return call(address(), '/v1/workgroups', {
         body: {
@@ -396,6 +396,9 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
           ...(notice === undefined ? {} : { notice }),
           ...(upgradeId === undefined ? {} : { upgradeId }),
           ...(endpointIds === undefined ? {} : { endpointIds }),
+          // Which of those Bots leads the group. Sent because only THIS machine knows which of its
+          // Bots is its Main Bot; every other machine reads the answer back instead of deriving one.
+          ...(leadEndpointId === undefined ? {} : { leadEndpointId }),
         },
         token,
       })
@@ -420,16 +423,18 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
     // The two settings the Hub stores. Sending them is what makes a rename stick on the other
     // person's machine: without it the local record changed, the Hub kept the old value, and the
     // next roster read put it back.
-    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission }) {
+    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId }) {
       const token = await ensureAccess()
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/settings`, {
         body: {
           ...(name === undefined ? {} : { name }),
           ...(notice === undefined ? {} : { notice }),
           ...(replyMode === undefined ? {} : { replyMode }),
-          // `null` is a value here: "each member uses its own again", the original's
-          // `delete room.permission`. So it is forwarded, not skipped.
+          // `null` is a value in both of these, not a missing one: "each member uses its own again"
+          // for `permission` (the original's `delete room.permission`) and "nobody chose a lead" for
+          // `leadMembershipId`. Forwarded rather than skipped, or a clear can never travel.
           ...(permission === undefined ? {} : { permission }),
+          ...(leadMembershipId === undefined ? {} : { leadMembershipId }),
         },
         token,
       })

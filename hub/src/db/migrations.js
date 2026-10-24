@@ -439,6 +439,29 @@ export const MIGRATIONS = [
       'ALTER TABLE memberships DROP COLUMN bot_role',
     ],
   },
+
+  {
+    // G4 修补（第三轮）：这个群的**管理员是哪一个成员**，由 Hub 记录。
+    //
+    // 原版本地群没有这一列，因为它的成员全是自己人，「谁是管理员」直接由 `rt.isMain(id)` 算出来
+    // （`defaultAdmin`：`members.includes(createdBy) ? createdBy : members.find(rt.isMain)`）。
+    // 工作群不能这么做：`rt.isMain` 问的是**这台机器**的 `mainBotIds`，而工作群的管理员应当是
+    // **群主**的 Main Bot。两台机器各有自己的 `mainBotIds`，于是同一行名册在两台机器上算出两个
+    // 不同的管理员——用户的指出：「工作群的 Main Bot 是群主的管理员/Main Bot」。
+    //
+    // Hub 只知道账号，不知道谁的 Bot 是 Main（那是每台机器自己的概念，从来没有上传过）。所以由
+    // **群主那台机器**在建群（或改设置）时把答案告诉 Hub：`lead_membership_id` 指向群主选定的那个
+    // 成员行。别的机器读名册就得到同一个答案，不再自己算。
+    //
+    // 它是 `memberships.id` 而不是 endpoint id：成员被移除、重加时 endpoint 会复用，而 membership
+    // 是这一个人在**这个群**里的身份。`ON DELETE SET NULL` 让成员退出时自动清空，不会指一个
+    // 已经不在群里的人。
+    version: 7,
+    statements: [
+      `ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
+         REFERENCES memberships(id) ON DELETE SET NULL`,
+    ],
+  },
 ]
 
 export const LATEST_VERSION = MIGRATIONS.at(-1)?.version ?? 0

@@ -198,9 +198,25 @@ export function install(wg) {
             }
             if (published === undefined) return fail('Could not reach the Hub, so the workgroup was not created.', 'hub/unreachable')
             const endpoints = await wg.bridge.publishBotEndpoints().catch(() => [])
-            const endpointIds = endpoints
+            const inGroup = endpoints
               .filter(endpoint => members.some(member => String(member?.id) === String(endpoint.localBotId)))
-              .map(endpoint => endpoint.endpointId)
+            const endpointIds = inGroup.map(endpoint => endpoint.endpointId)
+            // THE LEAD OF A NEW WORKGROUP IS THE OWNER'S MAIN BOT — chosen here, ONCE, by the machine
+            // that can answer the question.
+            //
+            // `mainBotIds` is a per-machine fact the Hub has never known, and the original's rule
+            // (`defaultAdmin`: `members.find(rt.isMain)`) only works because a local group's members
+            // are all one team's. A workgroup spans accounts, and the admin is the owner's Main Bot
+            // (「工作群的 Main Bot 是群主的管理员/Main Bot」). Every machine deriving it locally picked
+            // its OWN Main Bot, so the same group had two different admins.
+            //
+            // Naming it here is what makes the answer one answer. Only when the composer actually
+            // included that Bot — a group started without it has no lead, and the local fallbacks
+            // still pick somebody.
+            const mainBotId = (wg.rt?.state?.mainBotIds ?? [])[0]
+            const leadEndpointId = mainBotId === undefined
+              ? undefined
+              : inGroup.find(endpoint => String(endpoint.localBotId) === String(mainBotId))?.endpointId
             const created = await wg.bridge.createWorkgroup({
               // The name the local room would use, because the Hub requires text and the composer legitimately
               // sends none. The original derives "You, Chief, …" from the members
@@ -213,6 +229,7 @@ export function install(wg) {
               name: name.trim() === '' ? wg.autoNameFor?.(members) ?? 'Workgroup' : name.trim(),
               notice: notice === '' ? undefined : notice,
               endpointIds: endpointIds.length === 0 ? undefined : endpointIds,
+              ...(leadEndpointId === undefined ? {} : { leadEndpointId }),
             })
             const room = wg.roomOfHubGroup(created.workgroupId)
             // The Hub's roster is the truth for membership, so the local room learns it here
@@ -253,7 +270,7 @@ export function install(wg) {
           // `room.admin` field could not be reused). `permission` is the group's own
           // preset, and only the user may set it — `updateWorkgroup` enforces that,
           // because this endpoint calls it with no actor.
-          for (const key of ['name', 'notice', 'mode', 'permission', 'workDir']) if (body[key] !== undefined) patch[key] = body[key]
+          for (const key of ['name', 'notice', 'mode', 'permission', 'workDir', 'lead']) if (body[key] !== undefined) patch[key] = body[key]
           if (body.adminId !== undefined) patch.adminId = body.adminId
           // The original's field name is `admin`; accept both so either caller works.
           if (body.admin !== undefined && body.adminId === undefined) patch.adminId = body.admin

@@ -484,7 +484,7 @@ export function install(wg) {
   //
   // `adminId` follows the Hub's owner, so a group renamed on one machine and an admin-only round on
   // another agree about who leads.
-  async function applyRoster({ hubWorkgroupId, members: hubMembers, replyMode, permission }) {
+  async function applyRoster({ hubWorkgroupId, members: hubMembers, replyMode, permission, leadMembershipId }) {
     if (hubWorkgroupId === undefined) return undefined
     await wg.load()
     const room = roomOfHubGroup(hubWorkgroupId)
@@ -588,20 +588,44 @@ export function install(wg) {
     // silent before the roster was projected. The user is the group's OWNER (`role === 'owner'`,
     // shown as 群主 by the roster), which the Hub tracks and this rule leaves alone.
     const answerable = next.filter(member => member.kind === 'localBot')
-    // The Main Bot, exactly as the original picks it. A member this machine cannot match to a Bot
-    // has no `botId`, so it can never be mistaken for one.
-    const mainBot = answerable.find(member => member.botId !== undefined && rt.isMain?.(member.botId) === true)
-    const owner = roster.find(member => member.role === 'owner')
-    // The owner's own Bot leads when they published one. Matched on `endpointId`, NOT on `id`: a
-    // local member's `id` is now the Bot's own id, so comparing it to the Hub's `ep_…` could never
-    // hold and the owner's Bot never led.
-    const ownerMember = owner === undefined || owner.memberType !== 'botEndpoint'
+
+    // WHO LEADS THIS WORKGROUP — THE OWNER'S MAIN BOT, AND THE SAME ON EVERY MACHINE.
+    //
+    // The original computes this locally (`defaultAdmin`, src/host/roster.js:332):
+    // `members.includes(createdBy) ? createdBy : members.find(rt.isMain) ?? null`. That is right for
+    // a LOCAL group, whose members are all one team's Bots: `rt.isMain` asks about ONE `mainBotIds`.
+    //
+    // A workgroup spans accounts, and the admin is the GROUP OWNER's Main Bot — the user's own words:
+    // 「工作群的 Main Bot 是群主的管理员/Main Bot」. Every machine computing `rt.isMain` answers about
+    // ITSELF, so Alice's machine picked Alice's Main Bot and Bob's machine picked Bob's, and the same
+    // group had two different admins. The two machines then ran `mode: 'admin'` rounds that asked
+    // different members.
+    //
+    // So the Hub's answer is used when there is one: `leadMembershipId` is chosen once by the owner's
+    // machine (which is the only place that knows which of its Bots is its Main) and read back here.
+    //
+    // The fallbacks below are unchanged and still matter: a group made before this field existed has
+    // no lead on the Hub, and a group whose lead has left (the column is `ON DELETE SET NULL`) must
+    // still have somebody asked first.
+    const hubLead = leadMembershipId === undefined || leadMembershipId === null
       ? undefined
-      : answerable.find(member => member.endpointId === owner.endpointId)
-    // The owner's Bot first, then the Main Bot, then the first answerable member so a group with no
-    // Main Bot still has somebody asked first, then whoever led before rather than dropping to
-    // nobody on a bad sync.
-    const adminId = ownerMember?.id ?? mainBot?.id ?? answerable[0]?.id ?? (room.adminId ?? null)
+      : next.find(member => member.membershipId === leadMembershipId)
+    // This machine's Main Bot. Still the right answer when the lead IS one of ours: it is the Bot the
+    // owner of this machine calls their chief.
+    const mainBot = answerable.find(member => member.botId !== undefined && rt.isMain?.(member.botId) === true)
+    // THE OWNER'S OWN BOT, now that the comparison can actually hold.
+    //
+    // The old test was `owner.memberType !== 'botEndpoint'`: `owner` is the roster's PERSON row
+    // (`role === 'owner'`), which is always `memberType: 'user'`, so `ownerMember` was ALWAYS
+    // `undefined` and this fallback never ran. The owner's endpoint membership is a SEPARATE row that
+    // carries `ownerUserId`, so that is what to look for.
+    const ownerUserId = roster.find(member => member.role === 'owner')?.userId
+    const ownerMember = ownerUserId === undefined
+      ? undefined
+      : answerable.find(member => member.ownerUserId === ownerUserId)
+    // The Hub's chosen lead, then the owner's own Bot, then this machine's Main Bot, then the first
+    // answerable member, then whoever led before rather than dropping to nobody on a bad sync.
+    const adminId = hubLead?.id ?? ownerMember?.id ?? mainBot?.id ?? answerable[0]?.id ?? (room.adminId ?? null)
 
     // Written only when it changed: every event would otherwise touch state.json, and a group with
     // traffic would rewrite the file on each message.
@@ -717,11 +741,49 @@ export function install(wg) {
     if (hubWorkgroupId === undefined) return undefined
     const answer = await wg.hub?.workgroup?.(hubWorkgroupId).catch(() => undefined)
     if (answer === undefined || Array.isArray(answer.members) === false) return undefined
+    // A GROUP MADE BEFORE THE LEAD FIELD EXISTED STILL GETS ITS LEAD.
+    //
+    // Creating a group names the lead (`channel.js`) and changing the admin names it again
+    // (`updateWorkgroup`). A group that already existed when the column arrived did neither, so it
+    // keeps `lead_membership_id = null` forever, every machine falls back to its own `rt.isMain`,
+    // and the divergence the field removes is still there.
+    //
+    // The owner's machine is the only one that can answer: `mainBotIds` is a per-machine fact, and
+    // only the owner's list describes the OWNER's Main Bot. So that machine fills the gap on the next
+    // roster read. This is the same condition as create, not a new rule.
+    //
+    // One attempt, no polling: after success the Hub has an answer and this test is false. Best
+    // effort by construction — a failed write is reported and the roster still applies with the
+    // original fallbacks, because a chat that cannot sync is worse than a lead that needs another
+    // try on the next sync. `applyRoster` deliberately stays free of network writes.
+    let resolvedLeadMembershipId = answer.leadMembershipId
+    if (answer.leadMembershipId === null) {
+      const hubUserId = wg.hub?.account?.hubUserId
+      const mainBotId = (rt.state?.mainBotIds ?? [])[0]
+      const mainMembership = mainBotId === undefined
+        ? undefined
+        : answer.members.find(member => member.memberType === 'botEndpoint'
+          && member.ownerUserId === hubUserId
+          && wg.bridge?.endpointBots?.()?.[member.endpointId] === mainBotId)
+      if (hubUserId !== undefined && answer.ownerUserId === hubUserId && mainMembership !== undefined) {
+        const written = await wg.bridge?.updateGroupSettings?.({ workgroupId: hubWorkgroupId, leadMembershipId: mainMembership.membershipId })
+          .then(() => true)
+          .catch(error => {
+            rt.warn?.('ds-bot: the lead of workgroup %s was not backfilled: %s', hubWorkgroupId, error?.message ?? error)
+            return false
+          })
+        // The current response predates the write. Use its own membership id locally so this
+        // roster read resolves the admin it just named; the next read gets the same answer from
+        // the Hub.
+        if (written === true) resolvedLeadMembershipId = mainMembership.membershipId
+      }
+    }
     return applyRoster({
       hubWorkgroupId,
       members: answer.members,
       replyMode: answer.replyMode,
       permission: answer.permission,
+      leadMembershipId: resolvedLeadMembershipId,
     })
   }
   wg.syncRoster = syncRoster
@@ -833,7 +895,7 @@ export function install(wg) {
     // the record afterwards (COPY OF the original, roster.js:445,459) and so only what actually moved
     // is pushed to the Hub. A snapshot rather than the name alone: the reply mode is pushed by the
     // same path, and it needs the same "did it change" test.
-    const before = { name: room.name, mode: room.mode, permission: room.permission ?? null }
+    const before = { name: room.name, mode: room.mode, permission: room.permission ?? null, lead: room.adminId ?? null }
     if (patch.name !== undefined) {
       const clean = String(patch.name).trim().slice(0, 60)
       // A custom name must be unique (the original's cleanRoomName rule); an empty one
@@ -1038,9 +1100,52 @@ export function install(wg) {
     // The group's permission preset is sent whenever the caller touched it, INCLUDING when it was
     // switched off: `null` is the value that means "each member uses its own again", and skipping it
     // would leave the old preset on the Hub for every other machine to keep applying.
+    // WHO LEADS THIS GROUP, SENT TO THE HUB.
+    //
+    // `room.adminId` is the original's field and `patch.adminId` above writes it; what is new is that
+    // the choice now TRAVELS. The original computes the admin locally (`defaultAdmin`:
+    // `members.find(rt.isMain)`), which is right for a local group because `rt.isMain` asks about one
+    // team's `mainBotIds`. A workgroup spans accounts and its admin should be the GROUP OWNER's Main
+    // Bot (「工作群的 Main Bot 是群主的管理员/Main Bot」), so each machine computing it from its own
+    // team produced a different admin and `mode: 'admin'` rounds asked different members.
+    //
+    // So whichever member this room now calls the admin is named to the Hub as `leadMembershipId`,
+    // and every other machine reads that instead of deriving one. `patch.lead` is accepted as an alias
+    // because the settings form speaks in member ids.
+    let leadTouched = false
+    // `patch.lead === null` is an INTENT, recorded before the re-resolution below overwrites
+    // `adminId`: "clear the Hub's choice", not "the new choice is the re-resolved member".
+    let leadCleared = false
+    if (patch.lead !== undefined) {
+      if (patch.lead !== null && !room.members.some(member => member.id === patch.lead)) {
+        throw new Error(`"${patch.lead}" is not a member of "${room.name}"`)
+      }
+      if ((room.adminId ?? null) !== (patch.lead ?? null)) {
+        room.adminId = patch.lead
+        leadTouched = true
+        if (patch.lead === null) leadCleared = true
+      }
+    }
+    // An admin change made through the ORIGINAL field (`patch.adminId`, which the settings form sends
+    // as `admin`) travels to the Hub the same way. Read AFTER the re-resolution below would be wrong —
+    // that would report a change the caller never asked for — so it is compared against `before` here.
+    if (patch.adminId !== undefined && room.adminId !== before.lead) leadTouched = true
+    // A CLEARED LEAD IS RE-RESOLVED HERE, because nothing else will do it in this call.
+    //
+    // `applyRoster` only recomputes `adminId` when it decides the roster "changed"; a group whose lead
+    // was just cleared has an unchanged member list, so on the next read it would keep the admin that
+    // was un-chosen. Clearing the choice has to mean "go back to the rule", not "have nobody".
+    //
+    // The rule is the same one `applyRoster` uses for a group with no lead: this team's Main Bot if it
+    // is here, else the first member that can answer.
+    if (room.adminId === null) {
+      const answerable = (room.members ?? []).filter(member => member.kind === 'localBot')
+      const mainBot = answerable.find(member => member.botId !== undefined && rt.isMain?.(member.botId) === true)
+      room.adminId = mainBot?.id ?? answerable[0]?.id ?? null
+    }
     const permissionTouched = patch.permission !== undefined
     if (room.hubWorkgroupId !== undefined
-      && (room.name !== before.name || patch.notice !== undefined || modeChanged || permissionTouched)) {
+      && (room.name !== before.name || patch.notice !== undefined || modeChanged || permissionTouched || leadTouched)) {
       const pushed = await Promise.resolve()
         .then(() => wg.bridge.updateGroupSettings({
           workgroupId: room.hubWorkgroupId,
@@ -1048,6 +1153,18 @@ export function install(wg) {
           ...(patch.notice !== undefined ? { notice: room.notice ?? '' } : {}),
           ...(modeChanged ? { replyMode: room.mode } : {}),
           ...(permissionTouched ? { permission: room.permission ?? null } : {}),
+          // The membership id this room resolved the chosen member to. `null` clears it on the Hub, so
+          // every machine goes back to its local rule instead of keeping a lead nobody chose.
+          // The MEMBERSHIP this room resolved its admin to, or `null` when there is none. Sent by
+          // membership id because that is the identity both machines agree on: the same Bot is a local
+          // id on its owner's machine and an `ep_…` on everybody else's.
+          ...(leadTouched
+            ? {
+                leadMembershipId: leadCleared
+                  ? null
+                  : (room.members ?? []).find(member => member.id === room.adminId)?.membershipId ?? null,
+              }
+            : {}),
         }))
         .then(() => undefined)
         .catch(error => error)

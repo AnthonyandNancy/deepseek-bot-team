@@ -72,13 +72,13 @@ export const HISTORY_KEYS = [
 // misses uploads a log. `localPath`, `workDir` and `localRoomId` are therefore refused as unknown
 // rather than merely ignored — a client author learns on the first call instead of discovering
 // later that the field they believed was published never was.
-export const CREATE_FIELDS = new Set(['name', 'notice', 'avatar', 'upgradeId', 'endpointIds'])
+export const CREATE_FIELDS = new Set(['name', 'notice', 'avatar', 'upgradeId', 'endpointIds', 'leadEndpointId'])
 
 // The settings a group may change AFTER it exists. A closed allow-list, for the same reason
 // `CREATE_FIELDS` is one: an unfamiliar field is a client bug worth naming now, not a value that
 // silently never travels. `avatar` and `upgradeId` are absent — the first is not exposed by any
 // client yet, and the second is the idempotency key of a create, not a setting.
-export const SETTINGS_FIELDS = new Set(['name', 'notice', 'replyMode', 'permission'])
+export const SETTINGS_FIELDS = new Set(['name', 'notice', 'replyMode', 'permission', 'leadMembershipId'])
 
 // Who answers a plain message in the group. The original has exactly these two
 // (`src/host/roster.js` `buildRoom`: `mode: 'admin'`), and a workgroup must not invent a third:
@@ -101,6 +101,7 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
 
   const byId = stmt('SELECT * FROM workgroups WHERE id = ?')
   const byUpgrade = stmt('SELECT * FROM workgroups WHERE upgrade_id = ?')
+  const setLead = stmt('UPDATE workgroups SET lead_membership_id = ?, config_version = config_version + 1 WHERE id = ?')
   const writeSettings = stmt('UPDATE workgroups SET name = ?, notice = ?, reply_mode = ?, permission = ?, config_version = config_version + 1 WHERE id = ?')
   const insertGroup = stmt(`INSERT INTO workgroups
     (id, owner_user_id, name, notice, avatar, config_version, last_seq, upgrade_id, created_at)
@@ -182,6 +183,15 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
     // or everybody in turn (`everyone`). It is a GROUP setting, not a per-machine preference — two
     // colleagues looking at the same group must agree about who was asked.
     replyMode: row.reply_mode ?? 'admin',
+    // WHICH MEMBER OF THIS GROUP LEADS IT — the answer to "who is the admin", decided once and read by
+    // every machine.
+    //
+    // The original computes this locally (`defaultAdmin`: `members.find(rt.isMain)`), which works for
+    // a local group because `rt.isMain` asks about ONE team. A workgroup spans accounts, and the admin
+    // should be the OWNER's Main Bot, so each machine computing it from its own `mainBotIds` produced
+    // a different answer on each machine. The owner's own machine now says which member that is, and
+    // this is where it is read back.
+    leadMembershipId: row.lead_membership_id ?? null,
     // THE ONE PERMISSION PRESET THE WHOLE GROUP SHARES, copied from the original's `room.permission`.
     // Absent means "each member uses its own", exactly as an absent `permission` on a local group does
     // (`src/host/permissions.js` `applyPermission`: `room?.permission ?? bot.permission`).
@@ -293,6 +303,15 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
       const avatar = body.avatar === undefined || body.avatar === null ? null : text(body.avatar, 'The avatar', 2048)
       const upgradeId = body.upgradeId === undefined || body.upgradeId === null ? null : text(body.upgradeId, 'The upgrade id', 128)
       if (upgradeId !== null && upgradeId.length === 0) throw badRequest('workgroup/invalid-field', 'The upgrade id must not be empty.')
+      // WHICH OF THE BOTS BEING ADDED LEADS THE GROUP.
+      //
+      // The owner's machine knows which of its Bots is its Main Bot; the Hub never has and never will
+      // (that is a per-machine fact). So the owner names it once, at create time, and every machine
+      // afterwards reads the answer instead of deriving one. Absent means "no lead chosen", and then
+      // the local rule applies exactly as it did before.
+      const leadEndpointId = body.leadEndpointId === undefined || body.leadEndpointId === null
+        ? null
+        : text(body.leadEndpointId, 'The lead Bot endpoint', 128)
       const endpointIds = body.endpointIds === undefined ? []
         : Array.isArray(body.endpointIds) ? [...new Set(body.endpointIds.map(String))] : undefined
       if (endpointIds === undefined) throw badRequest('workgroup/invalid-field', 'endpointIds must be an array of Bot endpoint ids.')
@@ -319,13 +338,23 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
         // Bot endpoints the caller publishes on their own devices. Validated against the endpoint
         // service so an id learned elsewhere cannot pull a stranger's Bot into this group; the
         // owner is already a member, which is exactly the condition `endpointFor` checks.
+        let leadMembershipId = null
         for (const endpointId of endpointIds) {
           const endpoint = endpointService?.endpointFor({ endpointId, workgroupId: id })
           if (endpoint === undefined) {
             throw badRequest('workgroup/endpoint-unknown', `"${endpointId}" is not a published Bot endpoint this account may add.`)
           }
-          insertMember.run(newId('mem'), id, 'botEndpoint', null, endpoint.id, 'member', at)
+          const membershipId = newId('mem')
+          insertMember.run(membershipId, id, 'botEndpoint', null, endpoint.id, 'member', at)
+          if (leadEndpointId !== null && endpoint.id === leadEndpointId) leadMembershipId = membershipId
         }
+        // A lead that is not one of the endpoints being added is a client bug worth naming: silently
+        // ignoring it would leave every machine falling back to its own guess, which is the bug this
+        // field exists to remove.
+        if (leadEndpointId !== null && leadMembershipId === null) {
+          throw badRequest('workgroup/invalid-field', 'leadEndpointId must be one of the Bot endpoints this group starts with.')
+        }
+        if (leadMembershipId !== null) setLead.run(leadMembershipId, id)
         db.exec('COMMIT')
       } catch (error) {
         db.exec('ROLLBACK')
@@ -540,6 +569,23 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
         }
         next.permission = body.permission === null ? null : body.permission.trim()
       }
+      // WHICH MEMBER LEADS. `null` clears it, and then every machine falls back to its local rule —
+      // the original's behaviour for a group with no chosen admin.
+      if (body?.leadMembershipId !== undefined) {
+        if (body.leadMembershipId === null) {
+          next.leadMembershipId = null
+        } else {
+          const wanted = String(body.leadMembershipId)
+          const row = stmt('SELECT * FROM memberships WHERE id = ? AND workgroup_id = ?').get(wanted, workgroupId)
+          // A member of THIS group, and a Bot: "who answers the group" is a question only something
+          // that can answer may hold.
+          if (row === undefined || row.status !== 'active' || row.member_type !== 'botEndpoint') {
+            throw badRequest('workgroup/invalid-field',
+              'The lead must be a Bot endpoint that is an active member of this group.')
+          }
+          next.leadMembershipId = wanted
+        }
+      }
       if (body?.replyMode !== undefined) {
         const mode = String(body.replyMode)
         if (!REPLY_MODES.has(mode)) {
@@ -552,6 +598,9 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
 
       // `config_version` is bumped so a client holding a cached copy can tell it is stale. The
       // column has existed since the first migration and this is the first writer.
+      if (next.leadMembershipId !== undefined) {
+        setLead.run(next.leadMembershipId, workgroupId)
+      }
       writeSettings.run(
         next.name ?? group.name,
         next.notice ?? group.notice,
@@ -641,7 +690,16 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
       }
 
       stmt("UPDATE memberships SET status = 'left' WHERE id = ?").run(row.id)
+      // A LEAD THAT LEAVES TAKES THE LEAD WITH IT.
+      //
+      // The column has `ON DELETE SET NULL`, but a member leaving is a STATUS change, not a delete —
+      // the row stays so the audit keeps a name. So the clear has to be explicit here, or the group
+      // keeps pointing at somebody who is no longer in it and every machine asks a Bot that left to
+      // answer.
+      const wasLead = byId.get(workgroupId)?.lead_membership_id === row.id
+      if (wasLead) setLead.run(null, workgroupId)
       audit.record({ actorId: userId, deviceId, action: 'workgroup.member-remove', targetId: row.id, result: 'ok' })
+      membershipChanged({ workgroupId, kind: 'left', membershipId: row.id })
       return { membershipId: row.id, status: 'left' }
     },
 

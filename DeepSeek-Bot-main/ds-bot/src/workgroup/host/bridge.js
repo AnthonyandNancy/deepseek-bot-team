@@ -560,8 +560,8 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     // ── groups ────────────────────────────────────────────────────────────────────
     // Creates the group on the Hub. The caller supplies `upgradeId` for an upgrade; the Hub's
     // answer says whether this call created it, which is what makes a retried upgrade harmless.
-    async createWorkgroup({ name, notice, upgradeId, endpointIds }) {
-      const created = await wg.hub.createWorkgroup({ name, notice, upgradeId, endpointIds })
+    async createWorkgroup({ name, notice, upgradeId, endpointIds, leadEndpointId }) {
+      const created = await wg.hub.createWorkgroup({ name, notice, upgradeId, endpointIds, leadEndpointId })
       stateOf(created.workgroupId)
       // The local room that represents this Hub group on this machine. Created once per Hub group
       // and reused on every later call, so a retried upgrade does not produce a second room.
@@ -760,8 +760,8 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       return wg.hub.leaveMember({ workgroupId, membershipId })
     },
     // A group's name and notice, changed for everyone (`groups.js` calls this after a rename).
-    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission }) {
-      return wg.hub.updateGroupSettings({ workgroupId, name, notice, replyMode, permission })
+    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId }) {
+      return wg.hub.updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId })
     },
     async answerInvite({ inviteId, accept }) {
       const answer = await wg.hub.answerInvite({ inviteId, accept })

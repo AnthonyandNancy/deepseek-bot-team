@@ -4,6 +4,7 @@
 - 日期：2026-10-22
 - 水位：**G5 完成**（方案 §14 的 5 条门禁有自动化证据；新增 N1/N2 通过；N3 与门禁 2 的真机一半待人工），未发版
 - 2026-10-23 补：**群内 Bot 交接**（方案 §5.1 的 `host/handoffs.js` 复制件）此前缺失，现已补上；属 G1 复制缺口，非 G5 范围
+- 2026-10-25 补：**旧群 lead 回填 + 发布包漏文件** 已闭环，属 G4/G5 已交付范围的缺陷，**不新开阶段**；整体水位仍为 G5 自动部分完成，下一步 G6
 
 ## 进度台账
 
@@ -15,8 +16,9 @@
 | G3 Hub 账号与设备 | 通过 | `hub-store`、`hub-client`、`hub-account-switch`、`hub-offline`；Hub 侧 123 测试 | 认证为手机号 + 密码，无 OTP |
 | G4 双机实时群聊与升级 | **自动部分通过（含 2 轮自查修复）** | `gates.md` 的门禁 2/3/4/5 + G4-A1..A19 + F1–F5 + G1–G3；hub 190 / ds-bot 990 | 门禁 1/6 与 T20 待人工；不发版 |
 | G5 跨用户委派与本人审批 | **自动部分通过（含补修轮）** | `g5/EVIDENCE-MATRIX.md`；hub 256 / ds-bot 1033 | 门禁 2 真机一半、N3 待人工 |
+| G4/G5 后补缺陷（lead 回填、发布包） | **已闭环（自动部分）** | `workgroup-membership.test.js` 18–22、`package-files.test.js`；ds-bot 1100 pass / 1 skip / 0 fail（串行），hub 263 pass | app 安装副本重装与重启待维护者执行 |
 | 人工验收 | 待执行 | `manual-checklist.md` | 由维护者执行 |
-| 发版 | 未执行 | 版本仍 0.2.0 | 需求明确不发版 |
+| 发版 | 未执行 | `ds-bot` 源码 0.2.3；未发版 | 需求明确不发版 |
 
 ## G4 做到什么
 
@@ -301,6 +303,10 @@ ALTER TABLE memberships  ADD COLUMN bot_role TEXT NOT NULL DEFAULT 'member'   �
 -- v6（Bot 权限改用原版模型，并清掉 v5 的自造字段）
 ALTER TABLE workgroups   ADD COLUMN permission TEXT                            -- 原版 room.permission
 ALTER TABLE memberships  DROP COLUMN bot_role
+
+-- v7（管理员是「群主的 Main Bot」，由群主机器指定一次）
+ALTER TABLE workgroups   ADD COLUMN lead_membership_id TEXT
+  REFERENCES memberships(id) ON DELETE SET NULL
 ```
 
 - `hub`：262 tests / 262 pass / 0 fail。三条锁定列清单的旧断言更新为新契约
@@ -327,6 +333,128 @@ ALTER TABLE memberships  DROP COLUMN bot_role
 **断言必须钉住「接通」而不是「存在」。** 两处变异第一次都没红，都是因为断言匹配到的是注释、定义或
 Hub 字段，而不是产品路径上真正生效的那一行。和 G5 补修轮的教训同一条：结构存在不等于接上了。
 
+## 管理员归属：工作群的 Main Bot 是群主的（2026-10-25 第三轮）
+
+用户指出：「工作群的 Main Bot 是群主的管理员/Main Bot」。这一条推翻了我上一轮「这是原版模型的固有局限、
+待定」的判断——它是个真缺陷，而且底下还压着一个死代码。
+
+### 三处根因
+
+**1. `ownerMember` 是死代码（真正的 bug）**
+
+```js
+const owner = roster.find(member => member.role === 'owner')
+const ownerMember = owner === undefined || owner.memberType !== 'botEndpoint'
+  ? undefined
+  : answerable.find(member => member.endpointId === owner.endpointId)
+```
+
+`owner` 是名册里**人**的那一行（`role === 'owner'`），它的 `memberType` 永远是 `'user'`。所以
+`owner.memberType !== 'botEndpoint'` **恒为真**，`ownerMember` 永远是 `undefined`——「群主的 Bot 领队」
+这条规则从写下那天起就从未执行过。群主的 Bot 是**另一行**（`memberType === 'botEndpoint'`，带
+`ownerUserId`），要按 `ownerUserId` 找。
+
+**2. `rt.isMain` 问的是「这台机器」**
+
+`mainBot = answerable.find(member => rt.isMain(member.botId))`，而 `answerable` 只含 `localBot`。
+`rt.isMain(id)` = `state.mainBotIds.includes(id)`——**本机**的 Main Bot 列表。于是：
+
+| 机器 | 选中的人 |
+|---|---|
+| Alice（群主） | Alice 的 Main Bot ✅ |
+| Bob（同事） | **Bob 的** Main Bot ❌ |
+
+同一个群在两台机器上有两个管理员，`mode: 'admin'` 的回合于是问了不同的人。
+
+**3. Hub 从来不知道谁是 Main Bot**
+
+`mainBotIds` 是每台机器自己的概念，从没上传过。Hub 只知道账号和 endpoint。
+
+### 修法（v7）
+
+由**群主那台机器**——唯一知道答案的机器——在建群时把答案告诉 Hub：
+
+```sql
+ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
+  REFERENCES memberships(id) ON DELETE SET NULL
+```
+
+- 建群：`POST /v1/workgroups` 带 `leadEndpointId`（群主 `mainBotIds[0]` 对应的 endpoint），Hub 存成
+  `memberships.id`。**用 membership 而不是 endpoint id**：同一个 Bot 在主人机器上是本地 id、在别人机器上
+  是 `ep_…`，而 membership 是「这个人在这一个群里的身份」，两台机器都认。
+- 读名册：`applyRoster` 优先用 `leadMembershipId` 命中的成员，**两台机器解析到同一个 membership**。
+- 改设置：`POST /v1/workgroups/:id/settings` 接受 `leadMembershipId`（`null` = 清空），只接受本群的、
+  在籍的 Bot endpoint。
+- 回退链保留且**仍然必要**：没有 lead（老群、或 lead 已退出）→ 群主自己的 Bot → 本机 Main Bot →
+  第一个可答成员 → 原 adminId。老群不会因为没这个字段就选不出人。
+
+### 一个必须显式处理的边界
+
+`ON DELETE SET NULL` **不会在成员退出时触发**——退出是 `status='left'`，行还在（审计要留名字）。所以
+`removeMember` 里显式清空；否则群一直指着一个已经不在群里的人，每次回合都去问一个退出的 Bot。
+
+清空之后 `adminId` 不能被留成 `null`：`applyRoster` 只在「名册变了」时重算，而清空 lead 的群成员一个没变。
+所以 `updateWorkgroup` 当场按本地规则重新解析（本机 Main Bot → 第一个可答成员），而不是等下一次读。
+
+### 证据
+
+- `ds-bot` **1101 tests / 1100 pass / 1 skip / 0 fail**（串行全量；并行一次为 1099/1/1，唯一失败是既有
+  `work-dir.test.js` 的 2 s 时序断言，单独与串行均通过）
+- `hub` 263 tests / 263 pass
+- `test/workgroup-membership.test.js` 新增 2 项（lead 主链路），全走 `apiHandle` + 真 Hub：
+  - 「群管理员是群主的 Main Bot，两台机器一致」：断言 Hub 记录了 lead、**Bob 的机器解析到同一个
+    `membershipId`** 且该成员在那边是 `remoteBot`；再断言移除 lead 后 Hub 列被清空。
+  - 「Hub 上没有 lead 时，群主自己的 Bot 仍然领队」：先把第二个 Bot 设成 lead，再清空，断言回到 Chief
+    而不是刚被取消的那个——这条也钉住了「清空 = 回到规则，不是没有人」。
+- 变异验证（改完立刻还原）：
+  - 去掉 `leadCleared` 的显式清空意图 → 用例红；
+  - 把 `hubLead` 从回退链首位挪走 → 用例红。
+- 真实库副本升级检查：`before v7 → applied (none)`，列齐全，2 个群 / 14 个成员数据完整。
+
+### 旧群回填：v7 字段存在，但老群永远是 null（2026-10-25 第四轮）
+
+建群与改设置会写 lead，可**字段出现之前建的群**两条路径都没走过，`lead_membership_id` 永远是 `null`，
+每次读名册仍退回本机 `rt.isMain`——也就是 v7 本要消灭的分歧，在老群上原样保留。
+
+修法仍按原版的责任划分，不新增概念：**群主那台机器**在 `syncRoster` 读到
+「Hub 无 lead + 本机是群主 + 本机 `mainBotIds[0]` 是该群一个 active Bot endpoint」时，补写一次
+`leadMembershipId`。条件与建群完全相同；不做轮询，成功后 Hub 已有答案，条件自然为假。失败只 warn，
+名册照常应用并走原回退链。`applyRoster` 不背网络写请求。
+
+`test/workgroup-membership.test.js` 18–22 共 5 项，覆盖：
+
+1. 群主机器补写一次，Hub 与本地 `adminId` 都指向本机 Main Bot，第二次同步不再写；
+2. 非群主机器不发请求，Hub 仍为 null，本地走回退链；
+3. Hub 已有 lead（别人的选择）时绝不覆盖；
+4. 本机 Main Bot 不在群内时不发请求；
+5. 补写失败不阻断名册读取，本地仍有可答的 admin。
+
+本轮另行做了一次“先红后绿”：未改 `syncRoster` 时第 1/2/3/5 项即失败；第 4 项当时就绿，是既有的安全
+分支，保留作回归钉。
+
+### 仍然如此的部分
+
+`mainBotIds` 依旧不上传——它是每台机器自己的事实，不该上 Hub。上 Hub 的只是「本群由哪个成员领队」这一个
+决定的结果。原版的 `defaultAdmin` 规则在**本地群**里仍然逐字未改。群主机器若长期离线，老群的 lead
+会等到它下一次同步才补上；在此之前各机器仍用原回退链，不会因此不可用。
+
+## 发布包：host 引用了没被打包的 client 源（2026-10-25 第四轮）
+
+`src/workgroup/host/bridge.js` 为“发布 Bot 外观快照”引用 `../../client/characters.js`，但
+`ds-bot/package.json` 的 `files` 没有 `src/client/`。源码树里能跑，发布包里缺文件；工作群域 install
+抛错并被 `index.js` 兜住，于是 **`/api/workgroup` 根本没注册，所有 Hub 调用（含登录）404**，本地 Bot
+团队却一切正常。
+
+- 修法：`files` 增 `"src/client/"`，让发布目录与源码一致；不复制函数、不造第二份真相。
+- `test/package-files.test.js`：从 `index.js` 与 `src/workgroup/index.js` 遍历**宿主实际加载的相对 import
+  图**，断言每个文件都被 `files` 覆盖。先红（缺 `characters.js`、`inks.js`），加清单后转绿。
+- `npm pack --dry-run --json` 复核：139 files；`src/client/characters.js`、`src/client/inks.js`、
+  `src/workgroup/host/bridge.js` 全部存在。
+- **尚未生效的最后一公里**：正在使用的 `app/node_modules/ds-bot` 是安装副本，仍缺 `src/client/`。
+  按约定本轮**未动 app 依赖、未重启**；维护者需在 `app/` 重装后重启应用，登录 404 才会真正消失。
+  验收标志：该副本出现 `src/client/characters.js`；日志不再有 `the Workgroup domain is unavailable`；
+  带 token 的 `POST /api/workgroup` 返回 JSON 而非 404。
+
 ## 已知缺口
 
 | # | 缺口 | 为什么现在不做 | 谁决定 | 何时回看 |
@@ -349,11 +477,12 @@ Hub 字段，而不是产品路径上真正生效的那一行。和 G5 补修轮
 | 16 | **人员没有显示名**：Hub `users` 表无 `display_name`，成员行显示打码手机号 | 加列属账号模型变更，且要处理两台机器一致 | 待定 | 需要「显示真实姓名」时 |
 | 17 | ~~已读游标客户端未写~~ | — | — | **已闭环（第 5 轮）** |
 | 18 | ~~成员在线状态未做~~ | — | — | **已闭环（第 5 轮）** |
-| 22 | ~~回复模式不同步到其他机器~~ **已做（2026-10-25）**：`workgroups.reply_mode` + `SETTINGS_FIELDS` 加 `replyMode`，两台机器读同一个值 | — | — | 已闭环。**管理员/工作目录/权限预设仍不同步**，理由见下 |
+| 22 | ~~回复模式不同步到其他机器~~ **已做（2026-10-25）**：`workgroups.reply_mode` + `SETTINGS_FIELDS` 加 `replyMode`，两台机器读同一个值 | — | — | 已闭环。权限预设也已同步（`workgroups.permission`）；**工作目录仍只在本机**，它是本机路径，不能上 Hub |
 | 23 | 群内「谁正在看」未画（Hub 名册有 `online`，UI 未用） | 微信式群聊会显示，但需要一条成员级订阅而非每次拉名册 | 待定 | 第 5 项跟进时 |
 | 24 | 动效只在「本机在跑」时可见；别的机器上的成员干活，本机看不到 | `roomWorkView` 是**本进程**的 `live` 表，跨机活动态要新的事件类型（`presence.working`） | 待定 | 第 6 项跟进时 |
-| 25 | **管理员（`adminId`）是每台机器自己算的**：`applyRoster` 按「群主发布的 Bot → Main Bot → 第一个可答成员」选，两台机器的 Bot 集合不同，选中的人可能不同 | 原版就是这么选的（`defaultAdmin` 用 `rt.isMain`），而「Main Bot」是**每台机器自己的**概念——所以这不是漏同步，是原版模型在多机下的固有局限。要跨机一致，需要 Hub 上记一个「本群由谁接待」，那是**新增**字段，得先有产品口径 | 待定 | 需要「整个群只有一个接待者」时 |
+| 25 | ~~管理员每台机器自己算~~ **已解决（v7）**：`workgroups.lead_membership_id`，由群主机器建群或改设置时指定；**老群由群主机器在 `syncRoster` 幂等回填**，各机器读同一个答案 | — | — | 已闭环（含老群回填） |
 | 26 | **成员列表每 1.2 s 一次 HTTP 轮询**，不是推送 | 客户端与宿主之间只有一条 POST 路由（`api.js`），原版团队自己的 roster 也是 1.5 s 轮询；加流式要新传输通道 | 本轮决定 | 轮询成为瓶颈时（大群、多标签页） |
+| 27 | **app 安装副本仍缺 `src/client/`**：源码与发布清单已修，但 `app/node_modules/ds-bot` 未重装，正在跑的应用仍会工作群域加载失败→登录 404 | 用户选择本轮不动 app 依赖、不重启 | 用户，2026-10-25 | 下次启动应用前，在 `app/` 重装并重启 |
 
 ## 第 4 轮自查修复（2026-10-22）
 
@@ -409,10 +538,16 @@ Hub 字段，而不是产品路径上真正生效的那一行。和 G5 补修轮
 | 2026-10-22 | G5：`newBot` 模式另建任务 Session，不复用新 Bot 的私聊 Session | 本轮发现：复用会被 `registerSessionOwner` 拒绝，且会污染该 Bot 的私人会话 |
 | 2026-10-22 | G5：任务进度在插件侧 2 秒窗口内合并 | `events` 是每个客户端都要补拉的表，不节流会无限增长 |
 | 2026-10-25 | 接受邀请只加人，**不再**自动带管家 Bot 入群；加哪个 Bot 由人决定 | 用户口径：去掉强制要求携带管家 bot 入群的限制，每个 bot 的权限由群设置 |
-| 2026-10-25 | `replyMode` 上 Hub（`workgroups.reply_mode`），管理员/工作目录/权限预设仍留在本地 | 前两项是「这个群怎么运作」，两台机器必须一致；后三项是「这台机器怎么跑」，且工作目录是 Hub 绝不能知道的路径 |
+| 2026-10-25 | `replyMode` 与 `permission` 上 Hub；**工作目录仍留在每台机器** | 群的运作方式必须两台一致；工作目录是本机路径，Hub 绝不能知道（方案 §13.2） |
 | 2026-10-25 | Bot 的 `avatar` 以**快照**形式上 Hub，而不是让对方按 id 派生 | 原版 `lookOf()` 按 id 派生；名册给的是 `ep_…`，只能传快照 |
 | 2026-10-25 | ~~`memberships.bot_role`~~ **已废弃（v6 删除）**，Bot 权限改用原版 `room.permission` 的远程副本 | 用户口径：原版怎么做的，工作群就怎么做，只加远程同步。原版没有「每个 Bot 在群里的角色」，权限是两层模型 |
+| 2026-10-25 | 管理员（`workgroups.lead_membership_id`）由**群主机器**建群时指定一次，各机器读同一个答案 | 用户口径：「工作群的 Main Bot 是群主的管理员/Main Bot」。`rt.isMain` 问的是本机 `mainBotIds`，两台机器各算各的必然分歧 |
+| 2026-10-25 | 老群 lead 由群主机器在 `syncRoster` 幂等回填，不轮询、不阻塞名册 | 否则字段出现之前建的群永远为 null，v7 的修复对它们不生效；回填判据与建群完全相同 |
+| 2026-10-25 | lead 存的是 `memberships.id`，不是 endpoint id | 同一个 Bot 在主人机器上是本地 id、在别人机器上是 `ep_…`；membership 是「这个人在这一个群里的身份」，两边都认 |
+| 2026-10-25 | `mainBotIds` 仍然不上传 | 它是每台机器自己的事实；上 Hub 的只是「本群由哪个成员领队」这个决定的**结果** |
 | 2026-10-25 | `workgroups.permission` 的 `null` 是**值**不是缺省 | 原版「各用各的」就是删掉 `room.permission`；Hub 永远返回该键，`null` 才可区分「这台机器上关掉了」与「你的 Hub 没有这个设置」 |
+| 2026-10-25 | 发布包加 `src/client/`，并用宿主 import 图自检 | host 的 `bridge.js` 实际 import `src/client/characters.js`；只改源码不改清单会让发布包工作群域加载失败、Hub 登录 404 |
+| 2026-10-25 | 本轮不动 `app/node_modules`、不重启应用 | 用户选择先交付源码；生效步骤与验收标志已记入缺口 27 |
 | 2026-10-25 | 面板刷新用 1.2 s 轮询，不上第二条推送通道 | 与原版 roster 轮询同形；一条 POST 路由是这两个域共用的边界 |
 
 ## 下一步：G5
@@ -425,7 +560,8 @@ Hub 字段，而不是产品路径上真正生效的那一行。和 G5 补修轮
 
 ## 下一步
 
-1. 人工执行 `manual-checklist.md`：门禁 1（两台真机）、门禁 5 目视、门禁 6 对照、T20 冷启动、**G5 门禁 2 真机一半、G5-N3、G5-T14 符号链接**。
-2. G6：群记忆（`group_memories`）、重启恢复、完整验收与交付。
-3. 缺口 16–18（人员显示名、已读游标 UI、成员在线状态）按需排期。
-4. 有 DSH checkout 时补跑 `dev/bench.sh smoke`。
+1. **让发布修复在用户机器上生效**：在 `DeepSeek-Bot-main/app/` 重装依赖并重启应用。验收：`app/node_modules/ds-bot/src/client/characters.js` 存在；日志不再出现 `the Workgroup domain is unavailable`；带 token 的 `POST /api/workgroup` 返回 JSON 而非 404。
+2. 人工执行 `manual-checklist.md`：门禁 1（两台真机）、门禁 5 目视、门禁 6 对照、T20 冷启动、**G5 门禁 2 真机一半、G5-N3、G5-T14 符号链接**。
+3. G6：群记忆（`group_memories`）、重启恢复、完整验收与交付。
+4. 缺口 16、23、24（人员显示名、谁正在看、跨机工作态）按需排期。
+5. 有 DSH checkout 时补跑 `dev/bench.sh smoke`。
