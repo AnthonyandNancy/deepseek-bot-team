@@ -1238,6 +1238,11 @@ export function install(wg) {
     dropLines(roomId)
     wg.roomInbox.delete(roomId)
     for (const [callId, round] of wg.roomProgress) if (round.roomId === roomId) wg.roomProgress.delete(callId)
+    // A deleted group has nobody left to continue a recovered round. Removing the projections with
+    // the room keeps a later `reconcileRounds` from finding an obligation for a group that is gone.
+    for (const [roundId, record] of Object.entries(wg.state.rounds ?? {})) {
+      if (record.roomId === roomId) delete wg.state.rounds[roundId]
+    }
     delete wg.state.workgroups[roomId]
     wg.releaseSessionOwner(roomId)
     await wg.save()
@@ -2288,6 +2293,7 @@ export function install(wg) {
       round.speaking = member.id
       round.turns = (round.turns ?? 0) + 1
       turns.set(member.id, (turns.get(member.id) ?? 0) + 1)
+      persist()
       // A remote member is a person (or a Bot) on another device. Their turn is not a model
       // call this machine can make: it is a message on the Hub, and the answer — if any —
       // arrives later as an event. The round therefore does not wait for it, exactly as it
@@ -2316,6 +2322,18 @@ export function install(wg) {
             cancel: () => { clearTimeout(timer); resolve(null) },
           })
         })
+        // WRITE THE EXCHANGE BEFORE THE HUB SEND.
+        //
+        // `deliverRemote` returns only after the bridge has put the call in its outbox or the Hub
+        // has acknowledged it. If the state file is written after that await, a process death in
+        // between leaves a call on the Hub whose exchange is nowhere on this machine: the answer can
+        // never be matched, which is the exact loss this projection exists to prevent. The slot is
+        // durably 'remote' with its exchange first; the send may then fail, and the failure path
+        // overwrites that record with 'failed'.
+        slot.status = 'remote'
+        slot.exchangeId = exchangeId
+        persist()
+        if (typeof wg.flushSave === 'function') await wg.flushSave()
         const delivered = await Promise.resolve()
           .then(() => wg.deliverRemote?.({ room, member, round, slot: { ...slot, exchangeId, roundId: round.id } }))
           .catch(error => ({ error }))
@@ -2347,14 +2365,15 @@ export function install(wg) {
           persist()
           continue
         }
-        slot.status = 'remote'
-        // The exchange lives on the slot BEFORE the wait begins. A restart can now recover the exact
-        // exchange whose answer closes this slot instead of treating the answer as a new opener.
-        slot.exchangeId = exchangeId
-        persist()
         const answered = await remoteReply
         round.remoteWaiters?.delete(exchangeId)
         round.speaking = null
+        if (round.state === 'stopped') {
+          // Stop won the race with an in-flight answer. The words may still be in `receiveRemote`'s
+          // log (the Hub is the record), but this round must not continue or rewrite its stopped
+          // slots.
+          continue
+        }
         if (answered === null || answered?.missed === true || answered === undefined) {
           slot.status = 'missed'
           round.passed.push(member.name)
@@ -2395,6 +2414,7 @@ export function install(wg) {
         persist()
         continue
       }
+      if (round.state === 'stopped') continue
       const sessionId = session.id
       await loadLines(room)
       const prompt = roomPrompt(room, member, round)
@@ -2405,6 +2425,7 @@ export function install(wg) {
       const said = []
       const reply = await roomTurn(room, member, sessionId, { text, files: prompt.files }, slot.note ?? 'your turn', signal, round, slot.by, said)
       round.speaking = null
+      if (round.state === 'stopped') continue
       const final = typeof reply === 'string' && !isPass(reply) ? reply : undefined
       if (reply?.failure !== undefined) {
         // Not a pass: the user sees why the member is silent, and the round goes on.
@@ -2440,11 +2461,21 @@ export function install(wg) {
       callMembers(round, turns, index, callees, `${member.name} mentioned you`, leads ? WG_ADMIN_TURNS_EACH : WG_TURNS_EACH, member.id)
       persist()
     }
-    // The loop is over. Only a round with nothing left to wait on is complete; a loop that ended on
-    // its turn budget while a remote slot is still outstanding leaves that slot as an obligation for
-    // Task 2's reconciler. Dropping it here would erase exactly the record the restart needs.
-    const open = (round.slots ?? []).some(slot => slot.status === 'remote' || slot.status === 'speaking')
-    if (open) {
+    // THE LOOP EITHER FINISHED THE ROUND OR LEFT A DURABLE OBLIGATION.
+    //
+    // Every slot that can still produce words later keeps the round open: a remote answer, a local
+    // turn that is still speaking, a member working past the round, or one waiting for approval.
+    // `waiting` is included too: the loop may have stopped on its turn budget before reaching it.
+    // Anything else is finished, and a finished round is removed rather than left as terminal junk.
+    if (round.state !== 'stopped') {
+      const pending = (round.slots ?? []).some(slot => ['remote', 'speaking', 'working', 'waiting-approval', 'waiting'].includes(slot.status))
+      round.state = pending ? 'open' : 'closed'
+    }
+    if (round.state === 'open') {
+      wg.persistRound(round)
+    } else if (round.state === 'stopped') {
+      // TERMINAL BUT KEPT: a persisted stop is what tells reconciliation and a late answer that
+      // this exchange will never continue. Dropping it here was the race that erased the user's stop.
       wg.persistRound(round)
     } else {
       wg.dropRound(round.id)
@@ -2549,7 +2580,25 @@ export function install(wg) {
   async function stopRound(roomId) {
     await wg.load()
     const rounds = [...wg.roomProgress.values()].filter(round => round.roomId === roomId)
-    if (rounds.length === 0) return false
+    if (rounds.length === 0) {
+      // A recovered round has no live object, but the user can still stop its obligation. Mark every
+      // open record terminal so reconciliation will never continue it, and report the stop.
+      let stopped = false
+      for (const record of Object.values(wg.state.rounds ?? {})) {
+        if (record.roomId !== roomId || record.state !== 'open') continue
+        record.state = 'stopped'
+        for (const slot of record.slots ?? []) {
+          if (['remote', 'speaking', 'waiting', 'working', 'waiting-approval'].includes(slot.status)) slot.status = 'stopped'
+        }
+        wg.persistRound(record)
+        stopped = true
+      }
+      if (stopped) {
+        appendLine(wg.workgroupOf(roomId), { who: 'User', kind: 'stopped', text: '' })
+        await wg.save()
+      }
+      return stopped
+    }
     let stopped = false
     for (const round of rounds) {
       // A called Bot's turn has no outer `exec.signal`; aborting its own controller is what makes
@@ -2575,12 +2624,17 @@ export function install(wg) {
         stopped = true
       }
       round.speaking = null
-      for (const slot of round.slots) if (slot.status === 'speaking' || slot.status === 'waiting' || slot.status === 'remote') slot.status = 'stopped'
+      for (const slot of round.slots) {
+        if (['speaking', 'waiting', 'remote', 'working', 'waiting-approval'].includes(slot.status)) slot.status = 'stopped'
+      }
       // TERMINAL, NOT DELETED. The round itself is gone with this process, but "the user stopped this
       // exchange" is a durable fact: a late answer after a restart must be logged and must not resume
-      // the round. Task 5 reads this state; dropping it here would make that answer look unanswered.
+      // the round.
       round.state = 'stopped'
       wg.persistRound(round)
+      // The loop may still be unwinding from the waiters just resolved. Marking it stopped is what
+      // makes `runRound` preserve this record instead of overwriting it with `closed`/`open`.
+      stopped = true
     }
     if (stopped) appendLine(wg.workgroupOf(roomId), { who: 'User', kind: 'stopped', text: '' })
     await wg.save()
@@ -2623,6 +2677,7 @@ export function install(wg) {
         if (slot !== undefined) slot.status = 'stopped'
         const at = (round.started ?? []).findIndex(entry => entry.exchangeId === exchangeId)
         if (at !== -1) round.started.splice(at, 1)
+        wg.persistRound(round)
       }
       stopped = true
     }
@@ -2761,8 +2816,9 @@ export function install(wg) {
       // A member a Bot's post calls by name works for that Bot.
       const named = opener.botId === undefined ? [] : mentionsIn(opener.text ?? '', room.members ?? []).found
       const round = {
-        // Stable identity for the persisted obligation. It is the same id a remote call already
-        // carries on the wire, so an answer can be matched to this round after a restart.
+        // Stable identity for the persisted obligation and the `roundId` a remote call carries on
+        // the wire. The answer is matched by `exchangeId`; the round id says which obligation it
+        // belongs to.
         id: `round-${randomUUID()}`,
         roomId: room.id,
         members: room.members,
@@ -2811,14 +2867,24 @@ export function install(wg) {
       // group usable for human chat, which is exactly what §9.5 asks for.
       const fencing = await holdLeaseFor(room)
       if (fencing.held === false) {
+        // The projection was written before the lease because a remote call must be durable before
+        // it is sent. A refused lease means this round never runs, so that projection must not
+        // survive as an obligation nothing will continue.
+        wg.dropRound(round.id)
         wg.roomProgress.delete(exec.callId)
         exec.concludeTurn?.()
         return
       }
       try {
         await runRound(room, round, exec.signal ?? new AbortController().signal)
+        // `runRound` returns normally after either finishing or handing outstanding slots back to
+        // the projection. Only a round that was not durably left open is settled here.
+        if (round.state !== 'open' && wg.roundOf(round.id) !== undefined) wg.dropRound(round.id)
       } catch (error) {
         rt.warn('ds-bot: workgroup round in %s stopped: %s', room.name, error)
+        // A thrown loop cannot continue its slots. Keeping the projection would create an obligation
+        // no process is left to honour, which is exactly the orphan the reviewer found.
+        wg.dropRound(round.id)
       } finally {
         wg.roomProgress.delete(exec.callId)
         await releaseLeaseFor(room).catch(() => {})

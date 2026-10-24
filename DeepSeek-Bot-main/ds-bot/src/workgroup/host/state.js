@@ -140,9 +140,15 @@ export function install(wg) {
   const workgroups = () => Object.values(wg.state.workgroups)
   const linkOf = (localRoomId) => (localRoomId === undefined ? undefined : wg.state.links[localRoomId])
 
+  // Waits for every save queued so far to finish. The bridge uses it before handing a remote call
+  // to the Hub: the exchange must be on disk BEFORE the call can produce an answer. A rejection is
+  // already logged per write; this only reports that the queue drained.
+  const flushSave = () => writing.catch(() => {})
+
   Object.assign(wg, {
     load,
     save,
+    flushSave,
     statePath,
     workgroupOf,
     workgroups,

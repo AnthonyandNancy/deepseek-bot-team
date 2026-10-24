@@ -155,6 +155,22 @@ test('a workgroup round runs, posts each answer and records who passed', async (
   assert.equal(wg.workgroupOf(room.id).log.at(-1).text, '我建议先做隔离', 'the round is in the room log')
 })
 
+test('a finished round leaves no recovery record, and a stopped one does', async (t) => {
+  const { wg, answer, beginRound, stop, untilWaiter } = start()
+  t.after(stop)
+  const room = await ownRelaySession(wg)
+  const live = []
+  const original = wg.persistRound
+  wg.persistRound = (round) => { live.push(round.id ?? round.roundId); return original(round) }
+  const running = beginRound(room, '只让管理员回答一次')
+  const adminSession = await untilWaiter('bot-a')
+  await answer(adminSession, '完成了')
+  await running
+  const id = live.find(entry => entry !== undefined)
+  assert.ok(id !== undefined, 'the round was projected while it ran')
+  assert.equal(wg.roundOf(id), undefined, 'a fully answered round is not an open obligation')
+})
+
 test('a round names only the member an @mention calls', async (t) => {
   const { wg, answer, beginRound, stop } = start()
   t.after(stop)

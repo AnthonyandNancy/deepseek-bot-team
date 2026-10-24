@@ -19,9 +19,13 @@ export function install(wg) {
   // worse, survive a save that happened before the mutation. The plain copy is what makes "saved"
   // mean saved.
   const persistRound = (round) => {
-    if (round?.id === undefined) return undefined
+    // Accept BOTH shapes: a live round (`id`) while it runs, and a recovered plain record
+    // (`roundId`) from the reconciler. A recovered record has no live methods or arrays, and
+    // rejecting it would make reconciliation unable to mark an answer posted.
+    const roundId = round?.id ?? round?.roundId
+    if (roundId === undefined) return undefined
     const record = {
-      roundId: round.id,
+      roundId,
       roomId: round.roomId,
       startSeq: round.startSeq,
       slots: (round.slots ?? []).map(slot => ({
@@ -39,7 +43,7 @@ export function install(wg) {
       state: round.state ?? 'open',
       updatedAt: Date.now(),
     }
-    rounds()[round.id] = record
+    rounds()[roundId] = record
     void wg.save({ roomId: round.roomId, kind: 'round' }).catch(() => {})
     return record
   }
@@ -53,4 +57,11 @@ export function install(wg) {
   }
 
   Object.assign(wg, { roundOf, persistRound, dropRound })
+  // The brief names this map on the domain, not buried in `state`. A getter keeps it the same
+  // object that is saved, so callers cannot accidentally mutate a detached copy.
+  Object.defineProperty(wg, 'rounds', {
+    configurable: true,
+    enumerable: false,
+    get: rounds,
+  })
 }

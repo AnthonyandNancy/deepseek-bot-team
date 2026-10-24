@@ -651,6 +651,94 @@ test('a Bot line with an unresolved endpoint never falls back to the owner phone
 })
 
 
+// 8b. THE CALL'S EXCHANGE MUST BE ON DISK BEFORE THE HUB CAN SEE THE CALL.
+//
+// `deliverRemote` is the moment the call becomes observable to another machine. If the exchange is
+// written only after it resolves, the answer can arrive (and the process can die) in a window where
+// this machine has no record of what it asked. This test intercepts that exact seam, reads the state
+// file synchronously, and only then lets the send proceed — no graceful disposal is involved.
+test('a remote call writes its exchange to disk before it can reach the Hub', async (t) => {
+  const { alice, workgroupId } = await invitedPair(t)
+  const room = roomOf(alice, workgroupId)
+  const remote = room.members.find(member => member.name === 'BobChief')
+  assert.ok(remote !== undefined)
+
+  // Intercept the exact seam. Reading the file synchronously here proves what is durable at the
+  // instant the call could become visible to the Hub, with no disposal or queued save in between.
+  // Returning a controlled send error lets the round finish immediately instead of waiting for the
+  // real 240 s reply timeout; this test is about ordering, not the answer.
+  let durable
+  let sent
+  const original = alice.wg.deliverRemote
+  alice.wg.deliverRemote = async (args) => {
+    sent = args
+    const onDisk = JSON.parse(readFileSync(join(alice.home, 'workgroup', 'state.json'), 'utf8'))
+    durable = Object.values(onDisk.rounds ?? {})
+      .find(entry => entry.roomId === room.id)?.slots?.find(slot => slot.id === remote.id)
+    return { error: new Error('test send stops here') }
+  }
+  const round = {
+    id: 'round-durable-send',
+    roomId: room.id,
+    startSeq: room.seq + 1,
+    slots: [{ id: remote.id, name: remote.name, status: 'waiting' }],
+    replies: [],
+    passed: [],
+    failed: [],
+    started: [],
+    turns: 0,
+  }
+  alice.wg.roomProgress.set('call-durable-send', round)
+  await alice.wg.runRound(room, round, new AbortController().signal)
+  alice.wg.deliverRemote = original
+
+  assert.equal(sent?.slot?.exchangeId, round.slots[0].exchangeId,
+    'the exchange sent to the Hub is the one in the slot')
+  assert.equal(durable?.exchangeId, round.slots[0].exchangeId,
+    `the exchange was already on disk at the send seam: ${JSON.stringify(durable)}`)
+})
+
+// 8c. STOPPING WHILE A REMOTE CALL IS OUT CANNOT DELETE ITS OWN TERMINAL RECORD.
+//
+// Stop resolves the remote waiter so the round loop can unwind. The loop then resumes after the
+// await and used to rewrite the slot as missed/posted and drop the round, erasing the record that
+// says the user stopped it. This test keeps the round live and asserts the record AFTER that unwind.
+test('stopping a round while a remote call is out keeps it stopped', async (t) => {
+  const { alice, workgroupId } = await invitedPair(t)
+  const room = roomOf(alice, workgroupId)
+  const remote = room.members.find(member => member.name === 'BobChief')
+  assert.ok(remote !== undefined)
+
+  // Let the call register its waiter but never answer, then stop exactly as the panel does.
+  let entered
+  const reached = new Promise(resolve => { entered = resolve })
+  alice.wg.deliverRemote = async () => { entered(); return { sent: true, queued: true } }
+  const round = {
+    id: 'round-stop-race',
+    roomId: room.id,
+    startSeq: room.seq + 1,
+    slots: [{ id: remote.id, name: remote.name, status: 'waiting' }],
+    replies: [],
+    passed: [],
+    failed: [],
+    started: [],
+    remoteWaiters: new Map(),
+    turns: 0,
+  }
+  alice.wg.roomProgress.set('call-stop-race', round)
+  const running = alice.wg.runRound(room, round, new AbortController().signal)
+  await reached
+  await until(() => round.state === undefined || round.state === 'open', { label: 'the call to be waiting' })
+  const stopped = await alice.wg.stopRound(room.id)
+  assert.equal(stopped, true, 'the stop is reported even though only a remote slot is out')
+  await Promise.race([running, new Promise(resolve => setTimeout(resolve, 250))])
+
+  const record = alice.wg.roundOf('round-stop-race')
+  assert.ok(record !== undefined, 'the stopped record was not deleted by the unwinding loop')
+  assert.equal(record.state, 'stopped', 'it is still terminal after the loop resumes')
+  assert.equal(record.slots[0].status, 'stopped', 'and its slot did not turn into missed/posted')
+})
+
 // 9. A REMOTE SLOT IS AN OBLIGATION, NOT A PROCESS-LOCAL PROMISE.
 //
 // A round waiting on another machine holds an exchange id in memory. If the coordinator process is
