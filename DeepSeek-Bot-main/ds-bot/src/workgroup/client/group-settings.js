@@ -28,6 +28,7 @@ import { PermissionPicker } from '../../client/permission-picker.js'
 import { t } from '../../client/i18n.js'
 import { WorkgroupInviteRow } from './invite.js'
 import { ApprovalCards } from './tasks.js'
+import { callWorkgroup } from './api.js'
 
 export const ROOM_MODES = [
   ['admin', 'Admin leads', 'Plain messages go to the admin, who calls others with @Name.'],
@@ -67,6 +68,90 @@ function GroupPermission({ room, catalog, update }) {
     }),
     shared ? h('div', { className: 'bt-set-row bt-bs-row bt-bs-stack bt-gs-perm bt-veil' },
       h(PermissionPicker, { catalog, saved: room.permission, onPick: permission => update({ permission }) })) : null)
+}
+
+// Shared group memory: one card over the Hub's authoritative store. Every action goes through
+// `callWorkgroup('memory-*')`; a successful write re-reads the list, so the card never merges a
+// local guess. A `memory` feed signal from another machine triggers the same re-read.
+function MemoryCard({ workgroupId }) {
+  const [memories, setMemories] = useState([])
+  const [query, setQuery] = useState('')
+  const [type, setType] = useState('fact')
+  const [content, setContent] = useState('')
+  const [error, setError] = useState(null)
+
+  const readMemories = async () => {
+    if (workgroupId === undefined) return
+    try {
+      const answer = await callWorkgroup('memory-list', { workgroupId })
+      setMemories(Array.isArray(answer?.memories) ? answer.memories : [])
+      setError(null)
+    } catch (caught) { setError(caught?.message ?? String(caught)) }
+  }
+
+  useEffect(() => { void readMemories() }, [workgroupId])
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+    const onMemory = (event) => { if (event?.detail?.workgroupId === workgroupId) void readMemories() }
+    window.addEventListener('workgroup:memory', onMemory)
+    return () => window.removeEventListener('workgroup:memory', onMemory)
+  }, [workgroupId])
+
+  if (workgroupId === undefined) return null
+  const run = async (action) => {
+    try { await action(); await readMemories() } catch (caught) { setError(caught?.message ?? String(caught)) }
+  }
+  const search = async () => {
+    if (query.trim() === '') { await readMemories(); return }
+    try {
+      const answer = await callWorkgroup('memory-search', { workgroupId, query })
+      setMemories(Array.isArray(answer?.memories) ? answer.memories : [])
+      setError(null)
+    } catch (caught) { setError(caught?.message ?? String(caught)) }
+  }
+  const add = () => {
+    if (content.trim() === '') return
+    void run(async () => {
+      await callWorkgroup('memory-create', { workgroupId, type, content, sourceRefs: [], acl: [] })
+      setContent('')
+    })
+  }
+  const correct = (memory) => {
+    const next = window.prompt(t('Correct this memory'), memory.content)
+    if (next === null || next.trim() === '' || next === memory.content) return
+    void run(() => callWorkgroup('memory-correct', {
+      workgroupId, memoryId: memory.memoryId, content: next, expectedVersion: memory.version,
+    }))
+  }
+  const remove = (memory) => {
+    void run(() => callWorkgroup('memory-delete', {
+      workgroupId, memoryId: memory.memoryId, expectedVersion: memory.version,
+    }))
+  }
+  return h(Card, { title: t('Group memory') },
+    h('div', { className: 'bt-set-row bt-bs-row bt-bs-stack bt-wg-memory' },
+      h('input', {
+        type: 'search', value: query, placeholder: t('Search group memory'),
+        onChange: event => setQuery(event.target.value),
+        onKeyDown: event => { if (event.key === 'Enter') void search() },
+      }),
+      h('button', { type: 'button', className: 'bt-mini', onClick: () => void search() }, t('Search')),
+      h('select', { value: type, onChange: event => setType(event.target.value) },
+        ['canon', 'decision', 'faq', 'fact', 'artifact'].map(kind => h('option', { key: kind, value: kind }, kind))),
+      h('textarea', {
+        value: content, placeholder: t('Add something every member should know'), rows: 2,
+        onChange: event => setContent(event.target.value),
+      }),
+      h('button', { type: 'button', className: 'bt-mini', onClick: add }, t('Add memory')),
+      error === null ? null : h('span', { className: 'bt-set-hint', role: 'alert' }, error),
+      memories.length === 0
+        ? h('span', { className: 'bt-set-hint' }, t('No group memory yet.'))
+        : memories.map(memory => h('div', { key: memory.memoryId, className: 'bt-set-row bt-bs-row bt-wg-memory-entry' },
+          h('span', { className: 'bt-set-copy' },
+            h('span', { className: 'bt-bs-label' }, memory.content),
+            h('span', { className: 'bt-set-hint' }, `${memory.type} · ${t('version {version}', { version: memory.version })} · ${t('{count} sources', { count: (memory.sourceRefs ?? []).length })}`)),
+          h('button', { type: 'button', className: 'bt-mini', onClick: () => correct(memory) }, t('Correct')),
+          h('button', { type: 'button', className: 'bt-x', 'aria-label': t('Delete memory'), onClick: () => remove(memory) }, '×')))))
 }
 
 // A group chat's settings as grouped cards: its name and notice, who answers, its
@@ -148,6 +233,7 @@ export function GroupSettingsForm({ room, roster, actions, run, onDeleted }) {
         members.length < 2 ? t('Add a Bot first: a group chat needs at least two.')
           : admin ? t('{name} leads this group: it can call members with @Name, change the group, and post here.', { name: admin.name })
             : t('No admin yet. An admin can call members with @Name, change the group, and post here.')))),
+    h(MemoryCard, { workgroupId: room.hubWorkgroupId ?? room.hub?.workgroupId }),
     // —— DIFFERS FROM THE ORIGINAL (G5:审批可达) ——
     // Work another person asked this machine to do. It lives here because this drawer is the one a
     // person actually reaches: opening a workgroup goes through the original conversation view, and

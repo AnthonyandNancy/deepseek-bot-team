@@ -685,6 +685,15 @@ var ZH = {
   "Team memory": "团队记忆",
   "Every Bot reads it": "所有 Bot 都会读",
   "Group memory": "群记忆",
+  "Search group memory": "搜索群记忆",
+  "Add something every member should know": "添加一条所有成员都应知道的内容",
+  "Add memory": "添加记忆",
+  "No group memory yet.": "还没有群记忆。",
+  "Correct this memory": "修正这条记忆",
+  "Delete memory": "删除记忆",
+  "Correct": "修正",
+  "version {version}": "版本 {version}",
+  "{count} sources": "{count} 个来源",
   "Only its members read it": "只有群成员会读",
   "MEMORY.md, which every conversation reads": "MEMORY.md，每次对话都会读",
   "{used} of {limit} characters": "{used} / {limit} 字符",
@@ -6609,6 +6618,9 @@ var listenLive = (fn) => {
         payload = JSON.parse(event.data);
       } catch {
       }
+      if (payload.kind === "memory" && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("workgroup:memory", { detail: { workgroupId: payload.workgroupId } }));
+      }
       notify(payload);
     });
     liveSource.addEventListener("revision", () => notify({ kind: "revision" }));
@@ -12436,6 +12448,123 @@ function GroupPermission2({ room: room2, catalog, update }) {
     ) : null
   );
 }
+function MemoryCard2({ workgroupId }) {
+  const [memories, setMemories] = (0, import_react33.useState)([]);
+  const [query, setQuery] = (0, import_react33.useState)("");
+  const [type, setType] = (0, import_react33.useState)("fact");
+  const [content, setContent] = (0, import_react33.useState)("");
+  const [error, setError] = (0, import_react33.useState)(null);
+  const readMemories = async () => {
+    if (workgroupId === void 0) return;
+    try {
+      const answer = await callWorkgroup("memory-list", { workgroupId });
+      setMemories(Array.isArray(answer?.memories) ? answer.memories : []);
+      setError(null);
+    } catch (caught) {
+      setError(caught?.message ?? String(caught));
+    }
+  };
+  (0, import_react33.useEffect)(() => {
+    void readMemories();
+  }, [workgroupId]);
+  (0, import_react33.useEffect)(() => {
+    if (typeof window === "undefined" || typeof window.addEventListener !== "function") return void 0;
+    const onMemory = (event) => {
+      if (event?.detail?.workgroupId === workgroupId) void readMemories();
+    };
+    window.addEventListener("workgroup:memory", onMemory);
+    return () => window.removeEventListener("workgroup:memory", onMemory);
+  }, [workgroupId]);
+  if (workgroupId === void 0) return null;
+  const run2 = async (action) => {
+    try {
+      await action();
+      await readMemories();
+    } catch (caught) {
+      setError(caught?.message ?? String(caught));
+    }
+  };
+  const search = async () => {
+    if (query.trim() === "") {
+      await readMemories();
+      return;
+    }
+    try {
+      const answer = await callWorkgroup("memory-search", { workgroupId, query });
+      setMemories(Array.isArray(answer?.memories) ? answer.memories : []);
+      setError(null);
+    } catch (caught) {
+      setError(caught?.message ?? String(caught));
+    }
+  };
+  const add = () => {
+    if (content.trim() === "") return;
+    void run2(async () => {
+      await callWorkgroup("memory-create", { workgroupId, type, content, sourceRefs: [], acl: [] });
+      setContent("");
+    });
+  };
+  const correct = (memory) => {
+    const next = window.prompt(t("Correct this memory"), memory.content);
+    if (next === null || next.trim() === "" || next === memory.content) return;
+    void run2(() => callWorkgroup("memory-correct", {
+      workgroupId,
+      memoryId: memory.memoryId,
+      content: next,
+      expectedVersion: memory.version
+    }));
+  };
+  const remove = (memory) => {
+    void run2(() => callWorkgroup("memory-delete", {
+      workgroupId,
+      memoryId: memory.memoryId,
+      expectedVersion: memory.version
+    }));
+  };
+  return (0, import_react33.createElement)(
+    Card,
+    { title: t("Group memory") },
+    (0, import_react33.createElement)(
+      "div",
+      { className: "bt-set-row bt-bs-row bt-bs-stack bt-wg-memory" },
+      (0, import_react33.createElement)("input", {
+        type: "search",
+        value: query,
+        placeholder: t("Search group memory"),
+        onChange: (event) => setQuery(event.target.value),
+        onKeyDown: (event) => {
+          if (event.key === "Enter") void search();
+        }
+      }),
+      (0, import_react33.createElement)("button", { type: "button", className: "bt-mini", onClick: () => void search() }, t("Search")),
+      (0, import_react33.createElement)(
+        "select",
+        { value: type, onChange: (event) => setType(event.target.value) },
+        ["canon", "decision", "faq", "fact", "artifact"].map((kind) => (0, import_react33.createElement)("option", { key: kind, value: kind }, kind))
+      ),
+      (0, import_react33.createElement)("textarea", {
+        value: content,
+        placeholder: t("Add something every member should know"),
+        rows: 2,
+        onChange: (event) => setContent(event.target.value)
+      }),
+      (0, import_react33.createElement)("button", { type: "button", className: "bt-mini", onClick: add }, t("Add memory")),
+      error === null ? null : (0, import_react33.createElement)("span", { className: "bt-set-hint", role: "alert" }, error),
+      memories.length === 0 ? (0, import_react33.createElement)("span", { className: "bt-set-hint" }, t("No group memory yet.")) : memories.map((memory) => (0, import_react33.createElement)(
+        "div",
+        { key: memory.memoryId, className: "bt-set-row bt-bs-row bt-wg-memory-entry" },
+        (0, import_react33.createElement)(
+          "span",
+          { className: "bt-set-copy" },
+          (0, import_react33.createElement)("span", { className: "bt-bs-label" }, memory.content),
+          (0, import_react33.createElement)("span", { className: "bt-set-hint" }, `${memory.type} · ${t("version {version}", { version: memory.version })} · ${t("{count} sources", { count: (memory.sourceRefs ?? []).length })}`)
+        ),
+        (0, import_react33.createElement)("button", { type: "button", className: "bt-mini", onClick: () => correct(memory) }, t("Correct")),
+        (0, import_react33.createElement)("button", { type: "button", className: "bt-x", "aria-label": t("Delete memory"), onClick: () => remove(memory) }, "×")
+      ))
+    )
+  );
+}
 function GroupSettingsForm2({ room: room2, roster, actions, run: run2, onDeleted }) {
   const [adding, setAdding] = (0, import_react33.useState)(false);
   const [confirming, setConfirming] = (0, import_react33.useState)(false);
@@ -12566,6 +12695,7 @@ function GroupSettingsForm2({ room: room2, roster, actions, run: run2, onDeleted
         members.length < 2 ? t("Add a Bot first: a group chat needs at least two.") : admin ? t("{name} leads this group: it can call members with @Name, change the group, and post here.", { name: admin.name }) : t("No admin yet. An admin can call members with @Name, change the group, and post here.")
       ))
     ),
+    (0, import_react33.createElement)(MemoryCard2, { workgroupId: room2.hubWorkgroupId ?? room2.hub?.workgroupId }),
     // —— DIFFERS FROM THE ORIGINAL (G5:审批可达) ——
     // Work another person asked this machine to do. It lives here because this drawer is the one a
     // person actually reaches: opening a workgroup goes through the original conversation view, and

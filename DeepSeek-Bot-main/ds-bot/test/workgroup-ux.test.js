@@ -301,3 +301,19 @@ test('the settings form writes the Hub setting that makes the admin receive plai
   assert.match(groupsSrc, /const modeChanged = WG_ROOM_MODES\.includes\(replyMode\) && room\.mode !== replyMode/,
     'the other machine applies the shared mode on its next roster read')
 })
+
+test('the workgroup settings form lists, searches, adds, corrects and deletes group memory', () => {
+  const source = readFileSync(new URL('../src/workgroup/client/group-settings.js', import.meta.url), 'utf8')
+  for (const endpoint of ['memory-list', 'memory-search', 'memory-create', 'memory-correct', 'memory-delete']) {
+    assert.ok(source.includes(`callWorkgroup('${endpoint}'`), `${endpoint} goes through the one workgroup API`)
+  }
+  assert.match(source, /expectedVersion/, 'a correction sends the version it read')
+  // After a successful write the card re-reads the Hub; it never appends the write to a local list.
+  assert.match(source, /await readMemories\(\)/, 'a successful write re-reads memory-list')
+  assert.doesNotMatch(source, /setMemories\(\[\.\.\.memories/, 'the card does not merge a write locally')
+})
+
+test('a memory signal makes the open group re-read its memory section', () => {
+  const source = readFileSync(new URL('../src/workgroup/client/panel.js', import.meta.url), 'utf8')
+  assert.match(source, /kind === 'memory'/, 'the workgroup feed event names a memory refresh')
+})
