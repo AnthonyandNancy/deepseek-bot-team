@@ -121,6 +121,20 @@ const twoMembers = () => ([
   { id: 'bot-b', kind: 'localBot', name: 'Editor' },
 ])
 
+// Wait until the round has actually made a member's Session. A fixed sleep is not a
+// synchronization primitive: under the full parallel suite the Session can exist before its
+// waiter, and an answer delivered in that window is lost, which then waits out the 240 s reply
+// timeout. Timer polling (not setImmediate) lets the round's own continuations run.
+const waitForSession = async (wg, room, memberId, deadlineMs = 20_000) => {
+  const deadline = Date.now() + deadlineMs
+  while (Date.now() < deadline) {
+    const found = wg.workgroupOf(room.id).sessions?.[memberId]
+    if (found !== undefined) return found
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  return undefined
+}
+
 // The team's Bots as the host actually stores them. A member Session renders its Bot's
 // identity from `state.bots`, so a test about identity needs the Bots to exist — in the
 // real app they always do.
@@ -176,8 +190,7 @@ test('a round names only the member an @mention calls', async (t) => {
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '@Editor 你看看')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const editorSession = wg.workgroupOf(room.id).sessions['bot-b']
+  const editorSession = await waitForSession(wg, room, 'bot-b')
   assert.ok(editorSession !== undefined, 'the mentioned member was called')
   assert.equal(wg.workgroupOf(room.id).sessions['bot-a'], undefined, 'the unmentioned admin was not called')
   await answer(editorSession, '看过了，没问题')
@@ -528,8 +541,9 @@ test('a round\'s answers reach the client the original way: through the relay re
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '说说你的看法')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  await answer(wg.workgroupOf(room.id).sessions['bot-a'], '我建议先做隔离')
+  const adminSession = await waitForSession(wg, room, 'bot-a')
+  assert.ok(adminSession !== undefined, 'the admin was called')
+  await answer(adminSession, '我建议先做隔离')
   const result = JSON.parse(await running)
 
   // The ORIGINAL does not post in-round replies into the group's Session: `group_relay`
@@ -629,8 +643,7 @@ test('one member can be stopped while the round goes on', async (t) => {
   // two, the second would legitimately keep waiting and the test would hang on its own
   // setup rather than on the behaviour under test.
   const running = beginRound(room, '说说你的看法')
-  await new Promise(resolve => setTimeout(resolve, 40))
-  const adminSession = wg.workgroupOf(room.id).sessions['bot-a']
+  const adminSession = await waitForSession(wg, room, 'bot-a')
   assert.ok(adminSession !== undefined, 'the admin started working')
 
   assert.equal(await rpc('stop-member-work', { roomId: room.id, botId: 'bot-a' })
@@ -707,8 +720,7 @@ test('the kickoff opens a round with the admin and the original kickoff prompt',
   const relay = ctx.registeredTools.get('workgroup_relay')
   wg.registerSessionOwner('relay-kickoff', { kind: 'workgroup', workgroupId: room.id })
   const running = relay.execute({}, { agent: { id: 'relay-kickoff' }, callId: 'c-kick', signal: new AbortController().signal })
-  await new Promise(resolve => setTimeout(resolve, 40))
-  const adminSession = wg.workgroupOf(room.id).sessions['bot-a']
+  const adminSession = await waitForSession(wg, room, 'bot-a')
   assert.ok(adminSession !== undefined, 'the admin was called for the opening turn')
   const prompt = followups.findLast(entry => entry.sessionId === adminSession)?.message.content[0].text ?? ''
   assert.match(prompt, /created this group and has not written yet/, 'the original kickoff text is used')
@@ -728,8 +740,7 @@ test('an @mention in the first message calls that member and it answers', async 
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '@Editor 请检查一下')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const editorSession = wg.workgroupOf(room.id).sessions['bot-b']
+  const editorSession = await waitForSession(wg, room, 'bot-b')
   assert.ok(editorSession !== undefined, 'the mentioned member speaks')
   // The member is told it is in a group, and what "@Name" does there.
   await answer(editorSession, '检查完了')
@@ -745,8 +756,8 @@ test('a member at work posts what it says before its final answer', async (t) =>
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '查一下')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const session = wg.workgroupOf(room.id).sessions['bot-a']
+  const session = await waitForSession(wg, room, 'bot-a')
+  assert.ok(session !== undefined, 'the member session exists')
   const emit = async event => { for (const listener of ctx.listeners.get('session/event') ?? []) await listener({ id: session }, event) }
   await emit({ type: 'turn/start', data: { turn: 1 } })
   // A text WITH a tool call goes on at once: the member is still working.
@@ -799,8 +810,7 @@ test('a member Session reaches the model, and only the group Session relays', as
 
   // Run a round far enough that the admin's own member Session exists.
   const running = beginRound(room, '说说看')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const memberSession = wg.workgroupOf(room.id).sessions['bot-a']
+  const memberSession = await waitForSession(wg, room, 'bot-a')
   assert.ok(memberSession !== undefined, 'the member got its own Session')
 
   // The member's Session must reach the model. Before the fix it was relayed instead,
@@ -833,8 +843,7 @@ test('a workgroup member can read its own chat, and the group sees it looked', a
   // A round nobody answers waits for the reply timeout, so an assertion that fires early
   // must not leave it pending: stop the round however this test ends.
   t.after(() => wg.stopRound(room.id))
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const sessionId = wg.workgroupOf(room.id).sessions['bot-a']
+  const sessionId = await waitForSession(wg, room, 'bot-a')
   assert.ok(sessionId !== undefined)
 
   const tool = ctx.registeredTools.get('workgroup_read_own_chat')
@@ -869,7 +878,7 @@ test('a session that is not in a workgroup cannot use read_own_chat', async (t) 
 // so such a message opened a second round instead and the group looked like it had stopped
 // answering.
 test('a message typed during the last speaker stays in the same round', async (t) => {
-  const { ctx, wg, answer, beginRound, stop } = startRoundFixture()
+  const { ctx, wg, answer, beginRound, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   // Two members (a group may not have one, the original's `checkMembers`), with Writer
   // named by @mention so it is the ONLY speaker — which is the state this test needs: the
@@ -878,8 +887,7 @@ test('a message typed during the last speaker stays in the same round', async (t
   wg.registerSessionOwner('relay-session', { kind: 'workgroup', workgroupId: room.id })
   const running = beginRound(room, '@Writer 开始')
   t.after(() => wg.stopRound(room.id))
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const sessionId = wg.workgroupOf(room.id).sessions['bot-a']
+  const sessionId = await waitForSession(wg, room, 'bot-a')
   assert.ok(sessionId !== undefined)
 
   // The user types while that speaker is still answering. This is the real path: the
@@ -891,9 +899,9 @@ test('a message typed during the last speaker stays in the same round', async (t
 
   await answer(sessionId, '第一句')
   // The round then calls the member again for the message the user typed, inside the same
-  // round. Answer that second turn too, or the round waits for the reply timeout.
-  await new Promise(resolve => setTimeout(resolve, 30))
-  await answer(sessionId, '答你那句')
+  // round. Wait for that second waiter, or the answer is lost and the round waits out its timeout.
+  const secondSession = await untilWaiter('bot-a')
+  await answer(secondSession, '答你那句')
   const result = JSON.parse(await running)
   assert.ok(result.replies.some(reply => reply.kind === 'user' && reply.text === '顺便问一句'),
     'the message the user typed mid-round is part of this round, not a second one')
