@@ -128,7 +128,7 @@ export async function openMachine(t, { baseUrl, phone, home, root, name = 'machi
     // from a write that no longer matters.
     await new Promise(resolve => setTimeout(resolve, 25))
     await rt.workgroup?.flushSave?.().catch?.(() => {})
-    if (root !== undefined) rmSync(root, { recursive: true, force: true, maxRetries: 5 })
+    removeTemp(root)
   })
   const wg = rt.workgroup
   const call = (endpoint, payload) => wg.apiHandle(endpoint, payload)
@@ -200,6 +200,26 @@ export async function invitedPair(t) {
   const joined = await bob.wg.bridge.joinWithPrimaryBot({ workgroupId })
   assert.equal(joined.length, 1, 'Bob brings his own Bot explicitly')
   return { baseUrl, alice, bob, workgroupId }
+}
+
+// Windows can keep a just-closed file handle alive for a moment, especially when several realtime
+// files run in parallel. The temp directory is disposable; a cleanup race is not a product failure
+// and must not turn a green assertion into a red suite. Retry a few times, then warn and move on.
+function removeTemp(root) {
+  if (root === undefined) return
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      rmSync(root, { recursive: true, force: true, maxRetries: 3 })
+      return
+    } catch (error) {
+      if (attempt === 5) {
+        console.warn(`ds-bot test cleanup left ${root}: ${error?.message ?? error}`)
+        return
+      }
+      // A synchronous sleep is acceptable in a teardown hook and avoids a second event-loop turn.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
 }
 
 export function roomOf(machine, workgroupId) {

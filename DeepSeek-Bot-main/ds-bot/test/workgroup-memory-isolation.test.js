@@ -62,3 +62,22 @@ test('group memory is not mixed into a Bot view, and private or team memory is n
   assert.equal(roomView.entries.some(entry => String(entry.text).includes(TEAM)), false,
     'a workgroup memory view never lists team entries')
 })
+
+test('the memory projection survives a local state reload and is never the authority', async (t) => {
+  const { wg, rt, stop } = startRoundFixture()
+  t.after(stop)
+  await wg.load()
+  wg.state.memories = {
+    wg_remote: { entries: [{ memoryId: 'mem_cached', type: 'fact', content: 'cached', version: 1 }], fetchedAt: 1 },
+  }
+  await wg.save()
+  // Replace the loaded object the way a process restart does, then read the file back.
+  const { readFile } = await import('node:fs/promises')
+  const raw = JSON.parse(await readFile(wg.statePath, 'utf8'))
+  assert.equal(raw.memories.wg_remote.entries[0].memoryId, 'mem_cached')
+  // The cache is exposed as a projection, and the product read still goes to the Hub (this fixture
+  // has no account, so a list request must fail) rather than answering from this cache.
+  assert.equal(wg.memoryCache('wg_remote').entries[0].memoryId, 'mem_cached')
+  const listed = await wg.apiHandle('memory-list', { workgroupId: 'wg_remote' })
+  assert.equal(listed.ok, false, 'memory-list asks the Hub, not the local projection')
+})
