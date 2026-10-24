@@ -379,6 +379,9 @@ export function install(wg) {
   async function startTask(taskId) {
     const record = wg.liveTask(taskId)
     if (record === undefined) throw Object.assign(new Error('That task is not live.'), { code: TASK_ERROR.notApproved })
+    // A RUNNING task is already started. Returning the same record makes `task-start` idempotent for
+    // a caller that lost the answer; `runTask` separately checks whether its prompt was delivered.
+    if (record.state === 'RUNNING' && record.runId !== undefined) return record
     if (record.state !== 'APPROVED' && record.state !== 'INTERRUPTED') {
       throw Object.assign(new Error(`That task is ${record.state}; it cannot start.`), { code: TASK_ERROR.notApproved })
     }
@@ -396,9 +399,26 @@ export function install(wg) {
     //
     // The version is read from what each call RETURNS, not from `record`: `advanceTask` bumps the
     // record in place, so `record.version + 1` after the first call would already be one too far.
-    const assigned = wg.advanceTask(taskId, 'ASSIGNED', { version: record.version })
-    await reportToHub({ taskId, next: 'ASSIGNED' }).catch(() => {})
-    const running = wg.advanceTask(taskId, 'RUNNING', { version: assigned.version })
+    // A new explicit start gets a new run identity. An INTERRUPTED task keeps the old one for its
+    // history until the user starts this new run.
+    if (record.state === 'INTERRUPTED' || record.runId === undefined) {
+      record.runId = `run-${randomUUID()}`
+      record.runStartedAt = Date.now()
+      record.version += 1
+      await wg.save()
+    }
+    // An interrupted task is already past ASSIGNED on the Hub. Reporting ASSIGNED again is refused
+    // (`RUNNING -> ASSIGNED` is not a legal transition), so resume only goes straight to RUNNING.
+    // A fresh approved task still follows the full APPROVED -> ASSIGNED -> RUNNING path.
+    const resuming = record.state === 'INTERRUPTED'
+    if (resuming) {
+      wg.advanceTask(taskId, 'RUNNING', { version: record.version })
+    } else {
+      const assigned = wg.advanceTask(taskId, 'ASSIGNED', { version: record.version })
+      await reportToHub({ taskId, next: 'ASSIGNED' }).catch(() => {})
+      wg.advanceTask(taskId, 'RUNNING', { version: assigned.version })
+    }
+    const running = wg.taskOf(taskId)
     await reportToHub({ taskId, next: 'RUNNING' }).catch(() => {})
     wg.emitTask?.('started', { taskId })
     return running
@@ -417,6 +437,17 @@ export function install(wg) {
       throw Object.assign(new Error('That request has nothing to work on, so it was not started.'), { code: TASK_ERROR.empty })
     }
     const record = await startTask(taskId)
+    // ONE RUN, ONE DELIVERY.
+    //
+    // `startTask` may be called again by a retry or a reconnect. The first delivery is recorded
+    // durably BEFORE `wg.deliver` can start a turn; a later call that sees the marker returns the
+    // same record without prompting the Bot again. This is the side-effect-once fence T17 asks for,
+    // not merely request dedup.
+    wg.state.taskRuns ??= {}
+    const runMark = wg.state.taskRuns[record.runId]
+    if (runMark?.deliveredAt !== undefined) return record
+    wg.state.taskRuns[record.runId] = { deliveredAt: Date.now() }
+    await wg.save()
     // The delivery is `wg.deliver`, the copy of the original's `rt.deliver` that this domain already
     // has. It is the seam that already resolves the Agent, creates the user message, prefers
     // `followup`, falls back to `sessionController.prompt` and flushes — the four steps this function

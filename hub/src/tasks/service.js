@@ -133,6 +133,12 @@ export function createTaskService({ db, audit, now = () => Date.now(), workgroup
     if (FINAL_STATES.includes(row.state)) {
       throw conflict('task/already-finished', `That task is ${row.state} and cannot change again.`)
     }
+    // A SAME-STATE REPORT IS AN ACKNOWLEDGEMENT, NOT A TRANSITION.
+    //
+    // A device can lose the answer to its own `RUNNING` report and resend it after reconnecting (or
+    // after a restart adopted the task). The state has not moved, so accepting it changes nothing and
+    // must not bump the version. Other illegal moves stay refused.
+    if (next === row.state) return byId.get(row.id)
     if (!allowedNext(row.state).includes(next)) {
       throw conflict('task/transition-refused', `${row.state} → ${next} is not a transition plan §10.2 allows.`)
     }

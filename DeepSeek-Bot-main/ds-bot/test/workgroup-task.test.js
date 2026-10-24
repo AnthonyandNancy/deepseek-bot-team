@@ -448,6 +448,56 @@ test('the request the panel sends is signed and reaches the other machine', asyn
   assert.deepEqual(card.resources, ['resource:ledger'])
 })
 
+// ── T17: a started run is an idempotent side effect ───────────────────────────────
+// A caller may retry `task-start` after a lost answer, or the same request may be replayed on
+// reconnect. The Bot must not be asked twice, and a restart must not quietly run a new turn.
+
+test('starting the same approved task twice delivers it once', async (t) => {
+  const scene = await twoMachines(t)
+  const { taskId } = await askFor(t, scene, { title: '只执行一次的汇总' })
+  await scene.b.call('task-decide', { taskId, decision: 'granted', mode: 'existingBot', botId: 'b' })
+  await settled()
+  scene.b.ctx.__delivered = []
+
+  await scene.b.wg.runTask({ taskId })
+  const first = scene.b.wg.taskOf(taskId)
+  assert.equal(scene.b.ctx.__delivered.length, 1)
+  await scene.b.wg.runTask({ taskId })
+  assert.equal(scene.b.ctx.__delivered.length, 1, 'the second start must not prompt the Bot again')
+  assert.equal(scene.b.wg.taskOf(taskId).state, 'RUNNING')
+  assert.equal(scene.b.wg.taskOf(taskId).runId, first.runId, 'and it is the same run')
+})
+
+test('a restart while RUNNING marks the task interrupted and never replays it', async (t) => {
+  const scene = await twoMachines(t)
+  const { taskId } = await askFor(t, scene, { title: '重启中断的任务' })
+  await scene.b.call('task-decide', { taskId, decision: 'granted', mode: 'existingBot', botId: 'b' })
+  await settled()
+  await scene.b.wg.runTask({ taskId })
+  const record = scene.b.wg.taskOf(taskId)
+  assert.equal(record.state, 'RUNNING')
+  const runId = record.runId
+  assert.equal(typeof runId, 'string')
+  const deliveries = scene.b.ctx.__delivered.length
+
+  // Simulate the next process reading the SAME durable record. `indexTasks` is the product's
+  // rebuild hook, called by `state.load`; no test-only code may manufacture the state change.
+  scene.b.wg.indexTasks()
+  assert.equal(scene.b.wg.taskOf(taskId).state, 'INTERRUPTED')
+  assert.equal(scene.b.wg.taskOf(taskId).runId, runId, 'the interrupted run keeps its identity')
+  assert.equal(scene.b.ctx.__delivered.length, deliveries, 'no new prompt is sent by indexing')
+
+  // An explicit new start is allowed, but it is a NEW run: it must not reuse the interrupted run's
+  // delivery marker, and it must prompt the Bot itself. Merely indexing after a restart sends nothing.
+  await scene.b.wg.runTask({ taskId })
+  const resumed = scene.b.wg.taskOf(taskId)
+  assert.equal(resumed.state, 'RUNNING')
+  assert.ok(resumed.runId !== undefined && resumed.runId !== runId, 'an explicit start opens a new run')
+  assert.equal(scene.b.ctx.__delivered.length, deliveries + 1, 'the new run is prompted exactly once')
+  await scene.b.wg.runTask({ taskId })
+  assert.equal(scene.b.ctx.__delivered.length, deliveries + 1, 'and a replay of the new run is not delivered again')
+})
+
 // ── T14: the folder a task was approved for ──────────────────────────────────────
 // `checkInsideRoot` is the one place that answers "may this run here", and the plan's requirement is
 // specific: refuse and do NOT fall back to the team folder (§15 T14: "拒绝且不回退到团队目录").

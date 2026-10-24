@@ -246,6 +246,18 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     return true
   }
 
+  // Inbox application is serialized per group. A live `event` and a `sync.batch` can carry the same
+  // Hub event while neither has appended the line yet, so the durable `hubEventId` check alone cannot
+  // stop both from applying it. One promise chain per group makes the duplicate check and the append
+  // one critical section.
+  const inbox = new Map()
+  const serialized = (workgroupId, task) => {
+    const previous = inbox.get(workgroupId) ?? Promise.resolve()
+    const next = previous.then(task, task)
+    inbox.set(workgroupId, next.catch(() => {}))
+    return next
+  }
+
   const applyBatch = async (workgroupId, events) => {
     let applied = 0
     for (const event of [...events].sort((left, right) => left.seq - right.seq)) {
@@ -290,14 +302,14 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
         // sync below, which is triggered by the seq arithmetic rather than by a timer.
         const entry = stateOf(frame.workgroupId)
         const expected = entry.cursor + 1
-        void apply(frame.workgroupId, frame.event)
+        void serialized(frame.workgroupId, () => apply(frame.workgroupId, frame.event))
         if (frame.event.seq > expected) {
           socket.send(JSON.stringify({ v: 1, type: 'sync.request', workgroupId: frame.workgroupId, afterSeq: entry.cursor }))
         }
         return
       }
       case 'sync.batch': {
-        void Promise.resolve(applyBatch(frame.workgroupId, frame.events ?? []))
+        void serialized(frame.workgroupId, () => applyBatch(frame.workgroupId, frame.events ?? []))
           // The replay just put any matching answer into the log; close recovered slots from that
           // same authoritative page. Doing it after the batch, not before, means the local-log fast
           // path handles normal answers and the Hub read is only the fallback.

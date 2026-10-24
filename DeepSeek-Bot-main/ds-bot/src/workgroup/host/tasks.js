@@ -17,6 +17,7 @@
 // transition that is not listed is refused rather than coerced, because a task record that
 // says RUNNING for work nobody approved is exactly what this registry must never hold.
 
+import { randomUUID } from 'node:crypto'
 import { OWNER_KINDS } from './ownership.js'
 
 // Plan §10.2, in order, plus its branches.
@@ -122,6 +123,9 @@ export function install(wg) {
       ...grant,
       state: 'APPROVED',
       version: 0,
+      // A task has ONE run identity until it is explicitly started. Keeping it in the grant means a
+      // replayed `runTask` can recognise the work it already handed over.
+      runId: `run-${randomUUID()}`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }
@@ -207,6 +211,15 @@ export function install(wg) {
       if (record === null || typeof record !== 'object') continue
       if (typeof record.sessionId !== 'string' || record.sessionId === '') continue
       if (!OWNER_KINDS.includes('task') || !TASK_STATES.includes(record.state)) continue
+      // A run cannot survive the process that was executing it. Leaving RUNNING in the rebuilt map
+      // would let a later start believe work is still going on; replaying it could repeat a tool's
+      // side effect. The record is terminal until the user explicitly starts a new run.
+      if (record.state === 'RUNNING') {
+        record.state = 'INTERRUPTED'
+        record.interruptedAt = Date.now()
+        record.updatedAt = Date.now()
+        record.version += 1
+      }
       map.set(taskId, record)
     }
   }

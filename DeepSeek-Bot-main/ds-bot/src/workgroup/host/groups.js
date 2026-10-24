@@ -1613,7 +1613,7 @@ export function install(wg) {
   // The sender is never resolved to a local Bot: a remote line is another person's, and
   // `senderSessionId` is left to the member id the Hub assigned so the avatar and the name
   // are the ones the member list already shows.
-  async function receiveRemote({ workgroupId, event, mine = false }) {
+  async function receiveRemote({ workgroupId, event, mine = false, reconcile = false }) {
     await wg.load()
     const room = roomOfHubGroup(workgroupId) ?? wg.workgroupOf(workgroupId)
     if (room === undefined) return false
@@ -1699,11 +1699,17 @@ export function install(wg) {
     // 「后加入的 Bot 还是不会回应和执行，历史 @ 也不行，原版群聊却可以」. The original local group works
     // precisely because its composer prompts the group's own Session directly (`postToSession`), with
     // no Hub in between; for a Hub group this is that same prompt, one ack later.
-    if (mine === true && senderEndpointId === undefined) {
+    // A RECONCILED LINE IS HISTORY, NOT A NEW CONTRIBUTION.
+    //
+    // The answer is already in the Hub log; replaying it must not enqueue a relay turn on this
+    // machine. The ordinary remote-Bot branch does exactly that (`role: 'post', member: true`) and
+    // can open a second round if the group Session is idle. Reconciliation suppresses that branch
+    // entirely; the log line and the slot close are the whole effect it may have.
+    if (mine === true && senderEndpointId === undefined && reconcile !== true) {
       // Attributed to the user and queued through the same door the local composer uses, so the
       // round this starts is the one `openingSpeakers` already knows how to pick members for.
       await wg.postToSession?.(room, text, files.length === 0 ? {} : { files })
-    } else if (senderEndpointId !== undefined || member?.kind === 'remoteBot') {
+    } else if (reconcile !== true && (senderEndpointId !== undefined || member?.kind === 'remoteBot')) {
       // SOMEBODY ELSE'S BOT SAID THIS, AND THIS MACHINE'S CHAT HAS TO SHOW IT.
       //
       // The rule above ("a foreign line never enters the group Session") is what stops a second
@@ -1762,7 +1768,7 @@ export function install(wg) {
     // exact exchange is remote. The line above is the authority; mark that slot posted here so a
     // later reconciler does not re-deliver the same answer. Only an open record is touched: a stopped
     // one stays terminal.
-    if (typeof payload.exchangeId === 'string' && payload.exchangeId !== '') {
+    if (reconcile !== true && typeof payload.exchangeId === 'string' && payload.exchangeId !== '') {
       for (const record of Object.values(wg.state.rounds ?? {})) {
         if (record.roomId !== room.id || record.state !== 'open') continue
         const slot = (record.slots ?? []).find(entry => entry.exchangeId === payload.exchangeId)
@@ -2701,29 +2707,60 @@ export function install(wg) {
         wg.dropRound(record.roundId)
         continue
       }
+      // A record with a LIVE round is not recovered; its own waiter owns the close. Touching it
+      // here would race the in-memory round and could move a live slot from under its waiter.
+      const live = [...wg.roomProgress.values()].some(round => round.id === record.roundId)
+      if (live) continue
       let changed = false
-      for (const slot of record.slots ?? []) {
-        if (slot.status !== 'remote' || typeof slot.exchangeId !== 'string') continue
+      const pending = (record.slots ?? [])
+        .filter(slot => slot.status === 'remote' && typeof slot.exchangeId === 'string')
+      if (pending.length === 0) continue
+
+      // The LOCAL log is the fast path; a line that is already here closes its slot without a Hub
+      // read. What remains is looked up in ONE paged Hub scan, not one scan per slot.
+      const wanted = new Map(pending.map(slot => [slot.exchangeId, slot]))
+      for (const slot of pending) {
         const local = (room.log ?? []).find(line => line.exchangeId === slot.exchangeId)
-        if (local !== undefined) {
-          slot.status = 'posted'
-          changed = true
-          continue
-        }
-        if (room.hubWorkgroupId === undefined) continue
-        let page
+        if (local === undefined) continue
+        slot.status = 'posted'
+        wanted.delete(slot.exchangeId)
+        changed = true
+      }
+      if (wanted.size > 0 && room.hubWorkgroupId !== undefined) {
+        // Follow `hasMore`: an answer may be past the first page. Bounded by the Hub's cursor so a
+        // malformed page cannot loop forever. The map makes one page serve every pending exchange.
+        let afterSeq = Math.max(0, (record.startSeq ?? 1) - 1)
+        let pages = 0
+        const MAX_PAGES = 50
         try {
-          page = await wg.hub.events({ workgroupId: room.hubWorkgroupId, afterSeq: Math.max(0, (record.startSeq ?? 1) - 1) })
+          while (wanted.size > 0 && pages < MAX_PAGES) {
+            pages += 1
+            const page = await wg.hub.events({ workgroupId: room.hubWorkgroupId, afterSeq })
+            for (const event of page.events ?? []) {
+              const slot = wanted.get(event?.payload?.exchangeId)
+              if (slot === undefined) continue
+              const applied = await wg.receiveRemote?.({ workgroupId: room.hubWorkgroupId, event, reconcile: true })
+              if (applied !== true) continue
+              slot.status = 'posted'
+              wanted.delete(event.payload.exchangeId)
+              changed = true
+            }
+            if (page.hasMore !== true) break
+            const next = Number(page.nextAfterSeq)
+            if (!Number.isFinite(next) || next <= afterSeq) break
+            afterSeq = next
+          }
         } catch (error) {
           rt.warn('ds-bot: round %s not reconciled: %s', record.roundId, error?.message ?? error)
-          continue
         }
-        const event = (page.events ?? []).find(entry => entry?.payload?.exchangeId === slot.exchangeId)
-        if (event === undefined) continue
-        const applied = await wg.receiveRemote?.({ workgroupId: room.hubWorkgroupId, event })
-        if (applied === true) {
-          slot.status = 'posted'
-          changed = true
+        // A slot whose exchange was already consumed by the Hub replay is closed without a second
+        // write; the line carries the hubEventId and the round needs no further work.
+        for (const [exchangeId, slot] of wanted) {
+          if ((room.log ?? []).some(line => line.exchangeId === exchangeId)) {
+            slot.status = 'posted'
+            wanted.delete(exchangeId)
+            changed = true
+          }
         }
       }
       if (changed) wg.persistRound(record)

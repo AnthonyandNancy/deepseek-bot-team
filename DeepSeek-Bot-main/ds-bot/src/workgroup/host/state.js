@@ -28,6 +28,9 @@ const emptyState = () => ({
   // taskId -> the request this machine sent and has not seen answered. Local only: the Hub's
   // task row is the record, and this is what the panel polls between a send and its answer.
   taskOutbox: {},
+  // runId -> { deliveredAt } for a task run that has already been handed to its Session. This is the
+  // durable side-effect fence: a replayed start must not prompt the Bot a second time.
+  taskRuns: {},
   // endpointId -> local Bot id, for the Bot endpoints THIS machine published.
   //
   // The Hub answers a group's roster with endpoint ids only (`ep_…`), because that is what a
@@ -58,7 +61,7 @@ function adopt(raw) {
   if (raw === null || typeof raw !== 'object' || raw.version !== WG_STATE_VERSION) return emptyState()
   const state = emptyState()
   if (Number.isFinite(raw.revision)) state.revision = raw.revision
-  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'endpointBots', 'works', 'rounds']) {
+  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'taskRuns', 'endpointBots', 'works', 'rounds']) {
     const value = raw[key]
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) state[key] = value
   }
