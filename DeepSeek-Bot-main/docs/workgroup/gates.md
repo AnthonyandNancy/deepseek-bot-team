@@ -190,6 +190,56 @@ cd hub && npm test             # 253 pass / 0 fail
 git status --porcelain ds-bot/src/host/ # 空
 ```
 
+### 群内 Bot 交接（2026-10-23）
+
+用户报告「工作群的 Bot 不像原版那样相互流转，用着用着就没响应」。定位为 **G1 复制
+缺口**（方案 §5.1 的 `host/handoffs.js` 从未复制），不是 G5 的跨用户委派。四处一并补上：
+
+| # | 缺口 | 证据 |
+|---|---|---|
+| 1 | `workgroup/host/handoffs.js` 不存在，`reportRound` 却调 `rt.closeWork` | `the workgroup has its own hand-off ledger and the original never sees it` |
+| 2 | `session/event` 漏 `role: 'post'`，成员发帖进不了 round | `a member post reaches the round as a member post, not as something the user said` |
+| 3 | `turn/end` 无 waiter 就 `return`，round 放手的成员结果永不落地 | `a member that outlives its round slot still posts what its turn ended with` |
+| 4 | 无 `post_to_group` 对应物，`sub` 没有产生者 | `a post with report_back opens work under the request it serves, and the round closes it` |
+| 5 | `wg.live` 的 `info` 从未赋值 | 同上两条的 `role`/`askedBy` 路由 |
+
+`test/workgroup-handoff.test.js` 5 条，全部走产品路径（真 `workgroup_post`、真
+`workgroup_relay`、真 `session/event`）。变异三处各自被抓：停用 post 分支 → 3 条失败；
+`reportRound` 不关工 → 2 条；停用 late 分支 → 1 条。
+
+```
+cd ds-bot && npm test          # 1077 tests, 1076 pass / 1 skip / 0 fail
+cd ds-bot && npm run lint      # 0 error / 13 warning
+node scripts/build-client.mjs --check   # exit 0
+git status --porcelain ds-bot/src/host/ # 空
+```
+
+### 成员进出与群内发言上 Hub（2026-10-23）
+
+用户报三条：「同事同意加入后只有他自己进来，管家 Bot 没跟着」「同事看不到群历史和实时消息」
+「建群后再加的 Bot，管家调不动」。三条都属 **G4/G1 已交付部分**的缺口，不是 G5：
+
+| # | 缺口 | 修在哪 | 证据 |
+|---|---|---|---|
+| 1 | `answerInvite` 只插 `member_type='user'`，被邀请人的 Bot 从不加入 | `bridge.joinWithPrimaryBot`，在 `accept` 之后、首次读名册之前 | `accepting an invitation adds the colleague and their Main Bot` |
+| 2 | `addEndpointMember` 只有 admin 能调，刚加入的人（role `member`）连自己的 Bot 都加不了 | `hub/src/workgroups/service.js` 拆成「加自己的」与「加别人的」两条规则 | 同上 |
+| 3 | 本机 Bot 的发言从未上 Hub，同事拉到的几乎只有人手打的字 | `groups.js` 的 `mirrorLine`，接在 `postInRound` 与 `postToGroupSession` | `a Bot answering in the group reaches the other machine` |
+| 4 | 「添加成员」只传 id，成员记录没有 `kind`，回合按远程处理 | `groups.js` 的 `localMember` + Hub 名册同步 | `a Bot added to an existing group is a local member the round can call` |
+| 5 | 名册刷新整体覆盖 `room.members` | 加 Bot 时同步到 Hub，Hub 拒绝则回滚本地 | `a roster refresh keeps a Bot that the Hub accepted` |
+| 6 | `publishBotEndpoints` 早于 `rt.load()`／`wg.load()`：发布 0 个 Bot，且 `endpointBots` 被整体替换丢失 | 两处 `await load()` | 第 1、3 条用例在修复前均失败 |
+| 7 | 移除成员只删本地，Hub 名册不动，下次 `applyRoster` 又读回来 | `groups.js` 的 `removeFromHub`，Hub 调用先行 | `a Bot removed from the group is removed on the Hub too` |
+| 8 | `applyRoster` 的 `same` 只比 id/name/kind，`membershipId` 等字段的变化被判为无变化 | 比较扩到全部名册字段 | `replacing the member list removes the missing Bot on the Hub too` |
+| 9 | **Hub 工作群里发消息根本不启动回合**：`send-hub` 只交给 Hub，`receiveRemote` 又刻意不写群 Session，两条规则叠加后没有任何成员被叫到 | `apply` 加 `mine`；本机消息经 `postToSession` 进群 Session | `a message typed into a Hub group starts a round the Bots answer` |
+
+`test/workgroup-membership.test.js` 7 条，只走 `apiHandle`。变异各自被抓：停用接受后加入 →
+2 条失败；去掉 `kind` 推断 → 1 条；停用镜像 → 1 条；停用 `removeFromHub` → 2 条；`same`
+退回三个字段 → 2 条；停用 `mine` 分支 → 1 条（第 9 项，也就是「谁都没被叫到」）。
+
+```
+cd ds-bot && npm test    # 1080 tests, 1079 pass / 1 skip / 0 fail
+cd hub && npm test       # 262 tests, 262 pass
+```
+
 ### 工作群身份与邀请入口（2026-10-23）
 
 用户实际使用时发现「工作群里没有邀请同事的入口」。核对出两个叠加缺陷：**原版群设置本来没有邀请同事**（原版的群是本机概念，没有第二个人可邀请），而我写的邀请控件所在的 `BotPanel` **没有任何导航入口**（`WG_PANEL_KEY` 全仓只出现在注册处）。同时确认方案 **§5.1** 早已要求把 `client/group-settings.js` 复制到工作群域、并把「邀请」列为改造重点——**这份复制件从未存在**。

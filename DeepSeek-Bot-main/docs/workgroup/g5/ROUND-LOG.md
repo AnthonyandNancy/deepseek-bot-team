@@ -494,3 +494,150 @@ Hub 上已删除的群，可见且不丢数据。反过来则会在群仍存在�
   - 撤掉 `aria-current` → 「selected workgroup row is marked」失败
   - 撤掉 `...rowProps` → 「same "am I selected" source」失败
   - 撤掉 Hub 删除调用 → 「deleted workgroup stays deleted after a restart」失败
+
+---
+
+## 2026-10-23 · 工作群 Bot 之间不再流转（复制缺口，非 G5 范围）
+
+用户报告：工作群的 Bot 不像原版群聊那样互相流转——管家 Bot 把任务交给别的 Bot，
+用着用着就没响应了。定位结论：**这是 G1 复制完整性的缺口，不是 G5 的跨用户委派**。
+G5 做的是跨机器、跨用户的 `task.request` + 本人审批；同一个群内 Bot 之间的交接属
+方案 §5.1 的 A 类复制清单。
+
+### 缺了什么
+
+方案 §5.1 明文列了这一行：
+
+| 原版源码 | 复制目标 | 保留能力 |
+|---|---|---|
+| `host/handoffs.js` 群交接部分 | `workgroup/host/handoffs.js` | Bot 任务交接、结果回报 |
+
+**这个文件从来没建过。** 原版靠两处 `openWork` 给交接建一条「工作」记录
+（`tools.js:249` 的 `message_bot`、`tools.js:597` 的 `post_to_group`），
+交接链才能闭合：A 派活 → 记账 → B 回答 → `closeWork` 把结果并回 → A 被叫回来。
+
+工作群侧连带缺三处，每一处都足以单独断链：
+
+| # | 缺口 | 后果 |
+|---|---|---|
+| 1 | 无 `handoffs.js`；`reportRound` 却调 `rt.closeWork` | 原版台账里没有工作群的 work，永远关不掉 |
+| 2 | `session/event` 的 `user/message` 只认 `user`/`schedule`/`kickoff`，**漏了 `role: 'post'`** | 成员发帖进不了 round：`botId` 丢了（归给用户）、`reportBack` 丢了（`reportRound` 不跑）、`sub` 丢了（`post.sub` 恒 `undefined`） |
+| 3 | `turn/end` 只处理还在等它的 waiter，无 waiter 就 `return` | round 放手的成员静默到永久：它后来的结果不进日志 |
+| 4 | 无工作群的 `post_to_group` 对应物 | `sub` 没有产生者；成员用原版工具会得到 `No group chat called "…"` |
+| 5 | `wg.live` 的 `info` 从未赋值 | 即使补了 3，也读不到 `role`/`askedBy`，路由不了 |
+
+### 修法（全部落在 `src/workgroup/` 内）
+
+- 新建 `src/workgroup/host/handoffs.js`：`host/handoffs.js` 的复制件，读写
+  `wg.state.works` 与 `wg.live`，**绝不碰** `rt.state.works`（与 `ownership.js`
+  同一个反交叉污染原则）。装在 `groups` 之前，与原版 `index.js` 的顺序一致。
+- `state.js`：新增 `works: {}` 并加进 `adopt` 白名单（否则重启即丢在途交接）。
+- `groups.js` 的 `session/event`：补 `role: 'post'` 分支，把 `botId`/`name`/
+  `reportBack`/`sub`/`late`/`progress`/`quiet`/`failed`/`askedBy`/`logged` 原样带进
+  `roomInbox`（逐字对照原版 `turns.js:429-457`）；并在成员收到投递时记下
+  `live.info`。
+- `groups.js` 的 `turn/end`：无 waiter 时走原版 `turns.js:600-620` 的
+  `lateRoomReply`/`lateRoomFailure` 分支，读完 `info` 后清空。
+- `groups.js` 的 `reportRound`：`rt.closeWork` → `wg.closeWork`。
+- `groups.js` 的 `postToGroupSession`：恢复原版 `postToRoom` 的行为——round 在跑时
+  同时写日志与 `replies`，并带 `logged` 让 relay 不重复写。
+- 新增 `workgroup_post` 工具 + `WG_TOOLS.post`：原版 `post_to_group` 的复制件，
+  是 `sub` 的唯一产生者。
+- `turn/end` 里 `live.info` 用后即清（对照原版 `turns.js:527`），不让下一回合继承。
+
+### 一处有意的差异（已在代码里写明理由）
+
+原版对「round 放手后」的结果只写群 Session，日志等下一次 relay 补。工作群没有
+「下一次 relay」的保证——relay 只在用户或成员说话时触发——所以 `extra.late` 且无
+运行中 round 时**直接写日志**。不这样做，结果会一直不可见，正是用户看到的症状。
+
+### 验证
+
+- `ds-bot` **1073 tests / 1072 pass / 1 skip / 0 fail**；lint **0 error / 13 warnings**；
+  `build-client.mjs --check` exit 0；`git status --porcelain ds-bot/src/host/` 为空
+- 新增 `test/workgroup-handoff.test.js` 5 条，全部走产品路径（真 `workgroup_post`、
+  真 `workgroup_relay`、真 `session/event` 监听器，不直接调 `openWork`/`reportRound`）：
+  成员发帖以成员身份进 round、`report_back` 建工并闭合、回报进发帖者本人会话且带
+  `work`、晚到结果仍进群、台账不与原版互通
+- 变异验证（三处撤回，各自被抓）：
+  - 停用 `role: 'post'` 分支 → 3 条失败
+  - `reportRound` 不关工 → 2 条失败
+  - 停用 `lateRoomReply` 分支 → 1 条失败
+- `install.test.js` 的注册顺序表新增 `tool workgroup_post`（预期新增，非回归）
+
+## 2026-10-23 · 成员进出与群内发言上 Hub（G4/G1 收口，非 G5 范围）
+
+- 用户报三条：「同事同意加入后只有他自己进来，管家 Bot 没跟着」「同事看不到群历史和实时消息」
+  「建群后再加的 Bot，管家调不动」
+- 归属判定：三条都在 **G4（成员/邀请/Bot Endpoint/Hub 权威消息）** 与 **G1（复制完整性）**
+  里，不是 G5 的跨用户委派。G4 已标完成，所以这是已交付部分的缺口。
+- 根因四处：
+  1. `answerInvite` 只插 `member_type='user'`，被邀请人的 Bot 从不加入（`hub/src/workgroups/service.js:429`）；
+  2. `addEndpointMember` 用 `requireAdmin`，刚加入的人 role 是 `member`，连自己的 Bot 都加不了；
+  3. 本机 Bot 的发言从未上 Hub：`appendLine` 的 14 个调用点无一发送，同事拉 history 几乎空白；
+  4. 「添加成员」只发 id，`updateWorkgroup` 存成 `{id,name}`，没有 `kind`；`sessionFor` 与回合
+     判定都按 `kind !== 'localBot'` 当远程处理，回合只发一句「你被点名了」到 Hub，没人应答。
+- 附带两个加载时序缺陷（不修则第 1 条不生效）：
+  - `publishBotEndpoints` 早于 `rt.load()`，遍历到 0 个 Bot；
+  - 同函数写 `wg.state.endpointBots`，而 `wg.load()` 会整体替换 `wg.state`，先写的条目丢失
+    （实测 `b` 丢失、`b2` 保留）。
+- 改动文件：
+  - `hub/src/workgroups/service.js`：`addEndpointMember` 拆成「加自己的 Bot 只要成员 / 加别人的要 admin」，并在成功后广播 `member.changed`
+  - `src/workgroup/host/hub.js`：新增 `addEndpointMember`
+  - `src/workgroup/host/bridge.js`：新增 `primaryBotId`、`joinWithPrimaryBot`；`answerInvite` 在首次读名册前调用；`publishBotEndpoints` 前置两次 `load()`；`send` 接受可选 `eventId`
+  - `src/workgroup/host/groups.js`：新增 `localMember`、`mirrorLine`；`updateWorkgroup` 的 `add`/`members` 补 `kind`，Hub 群同步名册并在失败时回滚；`postInRound`、`postToGroupSession`（含 late）接镜像；`receiveRemote` 优先按 `botEndpointId` 归属
+  - `test/workgroup-membership.test.js`（新，4 条）
+- 验证：
+  - `ds-bot` 1077 tests / 1076 pass / 1 skip / 0 fail
+  - `hub` 262 tests / 262 pass
+  - `npm run lint` 0 error / 13 warning；`build-client.mjs --check` exit 0
+  - `git status --porcelain ds-bot/src/host/` 空
+- 变异验证（三处撤回，各自被抓）：
+  - 停用 `answerInvite` 里的 `joinWithPrimaryBot` → 2 条失败
+  - 去掉 `localMember` 的 `kind` 推断 → 1 条失败
+  - 停用 `mirrorLine` → 1 条失败
+- 有意的行为差异：Hub 群里加 Bot 失败时**回滚并报错**，不静默保留——保留只会活到下次名册
+  同步然后消失，正是「加了 Bot 但管家还是叫不动」且毫无提示的成因。
+- 遗留：`ds-bot/.gitignore` 的 `test*/` 会把新增测试文件挡在 `git status` 之外（既有测试是
+  强制添加的）。本轮未改该文件。
+
+### 补修：移除成员也要同步 Hub（同一轮）
+
+上一条只做了「加」的一半，核对称「方案全部执行完毕」时发现漏了「删」。不补的话症状和原 bug
+同形、方向相反：本地删掉 → 下次 `applyRoster` 从 Hub 读回来 → 「移除成员，过一会又回来了」。
+
+- `hub.js`：新增 `leaveMember`（Hub 的 `POST /v1/workgroups/:id/members/:id/leave` 从 G4 就存在，
+  一直没有调用方，又是「端点齐了、屏幕上没有」）
+- `bridge.js`：转发 `leaveMember`
+- `groups.js`：新增 `removeFromHub(room, members)`，`remove` 与 `members` 两条路径共用；
+  **先调 Hub 再删本地**——Hub 拒绝则本地不动并报错，避免「删了又自己回来」
+- `groups.js`：`applyRoster` 的 `same` 比较从 id/name/kind 三个字段扩到全部名册字段
+  （`botId`/`endpointId`/`membershipId`/`role`/`hubUserId`）。旧比较把「同一成员、但这次才拿到
+  membershipId」判为无变化并提前返回，于是成员记录里没有 `membershipId`，移除时无 id 可发
+- `test/workgroup-membership.test.js`：+2 条（`remove` 路径、整表 `members` 路径）
+- 变异验证：停用 `removeFromHub` 的两处调用 → 2 条失败；把 `same` 比较退回三个字段 → 2 条失败
+- `ds-bot` 1079 tests / 1078 pass / 1 skip / 0 fail；`hub` 262 pass；lint 0 error；`--check` 通过
+
+### 补修：工作群里发的消息根本不启动回合（本轮真正的根因）
+
+用户报「后加入的 Bot 还是不会回应和执行，历史 @ 也不行，原版群聊却可以」。前三轮修的都是
+成员**进群**的链路，而这一条是**回合根本不存在**。
+
+根因是两条各自正确的规则叠在一起：
+
+1. 工作群的编辑器走 `send-hub`，它只把消息交给 Hub 就返回——「我发的 = 大家都看得到」；
+2. `receiveRemote` 刻意不把 Hub 来的行写进群自己的 Session，理由写得很清楚：否则另一台机器会
+   再开一个回合，同一段对话被两台机器各答一遍。
+
+两条都对，合起来的结果是：**在 Hub 工作群里，任何消息都不产生回合**。没有任何 Bot 被叫到，
+所以「后加入的 Bot 不会回应」和「@ 也不行」是同一个现象，而原版本地群没有 Hub 夹在中间，
+编辑器直接 prompt 群 Session，因此正常。前几轮修的 `kind`、名册同步都是必要条件，但回合不存在
+时它们派不上用场。
+
+- `bridge.js`：`apply` 增加 `{ mine }`；`ack.ok` 里本机发出的消息以 `mine: true` 重放（Hub 不回显
+  给发送方，发送方只能从这里拿到自己的行）
+- `groups.js`：`receiveRemote` 在 `mine === true` 且不是 Bot 自述时，调用 `postToSession`，把这条
+  行按本地编辑器的路径写进群自己的 Session；别台机器的行保持原样不进 Session
+- `test/workgroup-membership.test.js`：+1 条（`a message typed into a Hub group starts a round the Bots answer`）
+- 变异验证：把 `mine` 分支停用 → 该条失败（8.4s 超时，正是「没人被叫到」）
+- `ds-bot` 1080 tests / 1079 pass / 1 skip / 0 fail（连续三次干净运行）；lint 0 error；`--check` 通过

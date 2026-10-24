@@ -40,6 +40,12 @@ const emptyState = () => ({
   // this device, not about the group: the same room resolves differently on every machine, and
   // that is correct. Rebuilt by `publishBotEndpoints` on every start, so a lost file heals.
   endpointBots: {},
+  // The work Bots hand each other (host/handoffs.js): who asked whom, and what is still
+  // out. Persisted because a Bot that asked for work waits across a restart, and losing the
+  // record would leave it waiting for an answer nothing will ever send. It lives here and
+  // not in the original's `state.works`, so one domain's hand-offs can never be read as the
+  // other's.
+  works: {},
 })
 
 // Only what this domain understands is kept; an unknown or older shape resets to
@@ -48,7 +54,7 @@ function adopt(raw) {
   if (raw === null || typeof raw !== 'object' || raw.version !== WG_STATE_VERSION) return emptyState()
   const state = emptyState()
   if (Number.isFinite(raw.revision)) state.revision = raw.revision
-  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'endpointBots']) {
+  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'endpointBots', 'works']) {
     const value = raw[key]
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) state[key] = value
   }

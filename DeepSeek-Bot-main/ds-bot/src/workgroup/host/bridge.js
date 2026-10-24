@@ -100,6 +100,15 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
   // `await` on `apply` is honest about when the line is actually there.
   const pending = new Map()
 
+  // This team's butler Bot: the Main Bot a team is created with (`roster.js` seeds `mainBotIds[0]`
+  // when the first Bot is made). Falls back to the first Bot that exists, so a team that has lost
+  // its Main bit still contributes somebody rather than nothing.
+  const primaryBotId = () => {
+    const bots = wg.rt?.state?.bots ?? {}
+    const main = (wg.rt?.state?.mainBotIds ?? []).map(String).find(id => bots[id] !== undefined)
+    return main ?? Object.keys(bots)[0]
+  }
+
   const emit = (name, payload) => {
     for (const listener of listeners) {
       try { listener(name, payload) } catch (error) { logger?.warn?.('ds-bot: bridge listener failed: %s', error?.message ?? error) }
@@ -171,7 +180,7 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
   // a seq beyond `cursor + 1` means something was missed: the local log applies it anyway (so the
   // user sees the newest line) and a gap pull fills in the rest, which is exactly the behaviour a
   // chat needs — never silently reordering, never waiting forever for one lost frame.
-  const apply = async (workgroupId, event) => {
+  const apply = async (workgroupId, event, { mine = false } = {}) => {
     const entry = stateOf(workgroupId)
     if (entry.seen.has(event.eventId)) return false
     if (entry.seen.size >= SEEN_LIMIT) {
@@ -200,12 +209,12 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       // account joined on another device. Creating it here is what makes the first message of such
       // a group visible instead of silently dropped.
       const shown = Promise.resolve()
-        .then(() => wg.receiveRemote?.({ workgroupId, event }))
+        .then(() => wg.receiveRemote?.({ workgroupId, event, mine }))
         .then((applied) => {
           if (applied === true) return undefined
           return Promise.resolve(wg.ensureLinkedGroup?.({ hubWorkgroupId: workgroupId }))
             .then(() => wg.syncRoster?.({ hubWorkgroupId: workgroupId }))
-            .then(() => wg.receiveRemote?.({ workgroupId, event }))
+            .then(() => wg.receiveRemote?.({ workgroupId, event, mine }))
         })
         .catch(error => logger?.warn?.('ds-bot: workgroup event %s not shown: %s', event.eventId, error?.message ?? error))
       // Remembered so a caller that awaits `apply` sees the line in the log; the socket path does
@@ -259,6 +268,7 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
           // machine has never seen, and without the roster that line can only be "A member". Best
           // effort — a Hub that refuses the roster call must not stop the messages.
           void Promise.resolve(wg.syncRoster?.({ hubWorkgroupId: workgroupId }))
+            .then(() => bridge.ensureOwnBotIsIn(workgroupId))
             .catch(error => logger?.warn?.('ds-bot: roster of %s not read: %s', workgroupId, error?.message ?? error))
         }
         emit('connected', { userId: frame.userId, deviceId: frame.deviceId, workgroups: frame.workgroups ?? [] })
@@ -305,7 +315,7 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
               sender: { userId: auth?.hubUserId, deviceId: auth?.deviceId },
               payload: sent.payload,
               createdAt: new Date(now()).toISOString(),
-            })
+            }, { mine: true })
           }
           emit('ack', { workgroupId, eventId: frame.eventId, seq: frame.seq, duplicate: frame.duplicate === true })
         }
@@ -580,11 +590,23 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
 
     // Sends a message. The Hub gets it first: a message that reaches the local log but not the Hub
     // would be invisible to everyone else, which is worse than a send that fails visibly.
-    async send({ workgroupId, text, attachments, botEndpointId }) {
-      const payload = { text, ...(attachments === undefined ? {} : { attachments }) }
-      if (text.trim() === '' && (attachments ?? []).length === 0) throw new BridgeError('Nothing to send', { code: 'bridge/empty', retryable: false })
+    async send({ workgroupId, text, attachments, botEndpointId, eventId, call }) {
+      const payload = {
+        text: String(text ?? ''),
+        ...(attachments === undefined ? {} : { attachments }),
+        // A `call` is the control payload that asks another machine to run a called member's turn
+        // (`deliverRemote`). It is carried on an ordinary `chat.message` so it uses the ordering,
+        // the replay and the dedup the Hub already gives a message — and it carries no text,
+        // because the group already holds the line that caused the call.
+        ...(call === undefined ? {} : { call }),
+      }
+      const empty = payload.text.trim() === '' && (attachments ?? []).length === 0
+      if (empty && call === undefined) throw new BridgeError('Nothing to send', { code: 'bridge/empty', retryable: false })
       const entry = stateOf(workgroupId)
-      const pending = { eventId: newEventId(), payload, queuedAt: now(), ...(botEndpointId === undefined ? {} : { botEndpointId }) }
+      // `eventId` is optional and exists for the mirror in `groups.js` (`mirrorLine`): a line the
+      // local log already holds must go up under THE ID THE LOG RECORDED, or the ack would come back
+      // as a different event and `receiveRemote` would draw the same sentence twice.
+      const pending = { eventId: eventId ?? newEventId(), payload, queuedAt: now(), ...(botEndpointId === undefined ? {} : { botEndpointId }) }
       entry.outbox.push(pending)
       if (!connected()) {
         // Queued. The reconnect flushes it with the same event id, so the Hub stores one copy.
@@ -727,6 +749,16 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     async invites() {
       return wg.hub.invites()
     },
+    // Takes one member out of a Hub group's roster. The mirror of `joinWithPrimaryBot`, and it has to
+    // exist for the same reason: without the Hub call a removed Bot came back on the next roster read
+    // (`applyRoster` replaces `room.members` from the Hub).
+    async leaveMember({ workgroupId, membershipId }) {
+      return wg.hub.leaveMember({ workgroupId, membershipId })
+    },
+    // A group's name and notice, changed for everyone (`groups.js` calls this after a rename).
+    async updateGroupSettings({ workgroupId, name, notice }) {
+      return wg.hub.updateGroupSettings({ workgroupId, name, notice })
+    },
     async answerInvite({ inviteId, accept }) {
       const answer = await wg.hub.answerInvite({ inviteId, accept })
       // Accepting a group means this machine now wants its room, its roster and its log — in that
@@ -734,17 +766,116 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       // authors.
       if (accept && answer.workgroupId !== undefined) {
         stateOf(answer.workgroupId)
+        // BEFORE THE FIRST ROSTER READ, and deliberately: a person joining alone is somebody the
+        // group has nobody to answer with. `joinWithPrimaryBot` puts this team's butler Bot in the
+        // group as an endpoint member, so the roster this machine reads next already contains it.
+        await bridge.joinWithPrimaryBot({ workgroupId: answer.workgroupId }).catch(error => {
+          // A join must not fail because the Bot could not be added: the person is in the group,
+          // which is the thing they asked for, and the Bot is retried on the next reconnect.
+          logger?.warn?.('ds-bot: this team\'s Bot was not added to %s: %s', answer.workgroupId, error?.message ?? error)
+          return undefined
+        })
         await ensureRoom(answer.workgroupId)
         await wg.syncRoster?.({ hubWorkgroupId: answer.workgroupId }).catch(() => {})
         await bridge.sync(answer.workgroupId)
       }
       return answer
     },
+
+    // Brings THIS TEAM'S BUTLER BOT into a group the person just joined, and returns the endpoints
+    // it added.
+    //
+    // Why the butler: `mainBotIds[0]` is the Bot a team is created with, the one the user calls
+    // their 管家 and the one every other Bot reports to. A colleague who joins a workgroup and
+    // arrives alone has nothing in the group that can answer on their side, so every round stops at
+    // their name — which is what 「同事同意加入后只有他自己进去了」 looks like from the other machine.
+    //
+    // Why not every published Bot: plan §7.4 is explicit that signing in never publishes, let
+    // alone joins, a whole team. One Bot is a colleague; ten would be a stampede.
+    //
+    // Idempotent twice over: `publishBotEndpoint` is idempotent per (owner, device, local Bot), and
+    // the Hub answers `created: false` for an endpoint already in the group.
+    async joinWithPrimaryBot({ workgroupId, botIds }) {
+      // Both states, for the two reads below: the workgroup state holds `endpointBots` and is
+      // REPLACED wholesale by `load()`, the team state holds the Bots. Reading either before it is
+      // loaded sees nothing.
+      await wg.load?.()
+      await wg.rt.load?.()
+      const wanted = Array.isArray(botIds) && botIds.length > 0 ? botIds.map(String) : [primaryBotId()].filter(Boolean)
+      if (wanted.length === 0) return []
+      // Published first: an endpoint that no longer exists cannot be added, and a publish is also
+      // how a renamed Bot gets its current name onto the roster.
+      await bridge.publishBotEndpoints().catch(() => [])
+      const byBot = new Map()
+      for (const [endpointId, localBotId] of Object.entries(wg.bridge?.endpointBots?.() ?? wg.state?.endpointBots ?? {})) {
+        byBot.set(String(localBotId), endpointId)
+      }
+      const added = []
+      for (const botId of wanted) {
+        const endpointId = byBot.get(botId)
+        if (endpointId === undefined) {
+          logger?.warn?.('ds-bot: Bot %s has no published endpoint, so it cannot join %s', botId, workgroupId)
+          continue
+        }
+        const result = await wg.hub.addEndpointMember({ workgroupId, endpointId }).catch(error => {
+          logger?.warn?.('ds-bot: Bot %s not added to %s: %s', botId, workgroupId, error?.message ?? error)
+          return undefined
+        })
+        if (result !== undefined) added.push({ botId, endpointId, created: result?.created === true })
+      }
+      if (added.length > 0) await wg.syncRoster?.({ hubWorkgroupId: workgroupId }).catch(() => {})
+      return added
+    },
+
+    // THIS ACCOUNT'S BUTLER BOT BELONGS IN EVERY GROUP THE ACCOUNT IS IN, AND NOTHING USED TO PUT IT THERE.
+    //
+    // `joinWithPrimaryBot` runs on exactly one path: `answerInvite`, once, at the moment an invitation
+    // is accepted. Measured on the user's own Hub database, that is not enough — one real group
+    // (`wg_6fd8512b…`) has an accepted invitation and ZERO `bot_endpoints` rows for the colleague, so
+    // that machine is in the group with nothing that can answer, and nothing will ever fix it:
+    // the invitation is already `accepted`, so `answerInvite` will not run again, and the roster the
+    // other machine reads will never mention a Bot that was never added.
+    //
+    // The repair is idempotent and it can only ever ADD this account's own butler, so running it on
+    // every connect is safe. It is deliberately NARROW: it acts only when the group has none of this
+    // account's Bots at all. That guard is what keeps it from undoing an intentional removal — a
+    // person who removes their butler from a group has usually left other Bots of theirs in it, and
+    // even when they have not, they asked for it on purpose, so 「移除成员」 stays removed.
+    async ensureOwnBotIsIn(workgroupId) {
+      if (workgroupId === undefined) return []
+      const roster = await wg.hub.workgroup(workgroupId).catch(() => undefined)
+      const members = Array.isArray(roster?.members) ? roster.members : []
+      if (members.length === 0) return []
+      // Which of this account's published endpoints are already in the group.
+      await bridge.publishBotEndpoints().catch(() => [])
+      const mine = wg.bridge?.endpointBots?.() ?? wg.state?.endpointBots ?? {}
+      const present = members.filter(member => member.memberType === 'botEndpoint' && mine[member.endpointId] !== undefined)
+      if (present.length > 0) return []
+      // A group this account is in with none of its Bots: the state the real database is in. Adding
+      // the butler is the same call an accepted invitation makes.
+      return bridge.joinWithPrimaryBot({ workgroupId })
+    },
     async workgroups() {
       return wg.hub.workgroups()
     },
     async workgroup(workgroupId) {
       return wg.hub.workgroup(workgroupId)
+    },
+    // This team's butler Bot, as `{ botId, name, endpointId }`, or `undefined` when the team has no
+    // Bot at all. The settings page and the member list both need to say WHICH Bot travels with this
+    // person when they join a group — that is the whole answer to 「管家 bot 是哪一个」, and without
+    // it the only way to find out was to look at another machine's roster.
+    butler() {
+      const botId = primaryBotId()
+      if (botId === undefined) return undefined
+      const bot = wg.rt?.state?.bots?.[botId]
+      const mine = wg.bridge?.endpointBots?.() ?? wg.state?.endpointBots ?? {}
+      const endpointId = Object.entries(mine).find(([, local]) => String(local) === String(botId))?.[0]
+      return {
+        botId: String(botId),
+        name: String(bot?.name ?? botId),
+        ...(endpointId === undefined ? {} : { endpointId }),
+      }
     },
 
     // ── bot endpoints ─────────────────────────────────────────────────────────────
@@ -757,6 +888,18 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     // the Hub instead of answering locally, which is why a workgroup's chat had no replies. It is
     // recorded here, at the one moment both halves are in hand.
     async publishBotEndpoints() {
+      // THE STATE FILE HAS TO BE READ FIRST.
+      //
+      // `wg.state` starts as an empty placeholder and `load()` REPLACES it with the adopted file
+      // (`state.js`: `wg.state = state`). An endpoint id written before that read lands on the
+      // placeholder and is thrown away a moment later, so the map came back holding only whichever
+      // Bot was published after the read — observed exactly: `b` missing, `b2` present. Everything
+      // downstream reads that map to decide which local Bot an endpoint stands for, and
+      // `joinWithPrimaryBot` reads it to find the endpoint to add, so a lost entry there is a Bot
+      // that silently cannot join a group.
+      await wg.load?.()
+      // And the team, for the same reason on the other side: `rt.state` is empty until `rt.load()`.
+      await wg.rt.load?.()
       const bots = wg.rt.state?.bots ?? {}
       const published = []
       let learned = false
@@ -802,29 +945,49 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     // a remote person never becomes a local Session). This is the production definition of that
     // seam — it was missing, and the round silently skipped such members.
     //
-    // What it does: turn the member's slot into a line on the Hub, addressed to the group. It is a
-    // `chat.message` like any other, so the other machine receives it through the same fan-out and
-    // the same ordering, which is what keeps two machines' logs identical.
+    // What it does: turn the member's slot into a CALL on the Hub, addressed to the group and naming
+    // the endpoint whose device must answer. It rides on a `chat.message` so it inherits the Hub's
+    // ordering, replay and dedup — the same guarantees a typed message gets — and the receiving
+    // machine's `receiveRemote` turns it into that member's own turn (`receiveCall` in `groups.js`).
     //
     // What it does NOT do: run anything on this machine, wait for an answer, or pretend the member
-    // replied. A workgroup message is another person's turn; the model work that answers it belongs
-    // to their device (and, for real cross-user delegation, to G5).
+    // replied. The model work belongs to the called member's device; the answer comes back as an
+    // ordinary group line through `receiveRemote` and `mirrorLine`.
     async deliverRemote({ room, member, slot }) {
       if (room === undefined || member === undefined) return { skipped: 'no-member' }
       const hubWorkgroupId = room.hubWorkgroupId
       // A group that is not on the Hub has no remote members: `kind !== 'localBot'` can only exist
       // in a Hub group's roster. Saying so beats a silent no-op.
       if (hubWorkgroupId === undefined) return { skipped: 'not-on-hub' }
+      // A PERSON IS NOT A BOT. Their device runs no Bot turn, so a call to them has nobody to answer
+      // it. The round already refuses to make a person a speaker (`openingSpeakers`), and this is
+      // the second half of that rule for any path that still reaches here.
+      if (member.kind === 'user') return { skipped: 'person' }
+      // The endpoint this member IS, on the Hub. Without it the call names nobody, and every machine
+      // in the group would have to guess whether it is the one being asked.
+      const endpointId = member.endpointId ?? member.id
+      if (typeof endpointId !== 'string' || endpointId === '') return { skipped: 'no-endpoint' }
 
-      // What the round would have said to a local member: the round's note and the new lines since
-      // the member last spoke. `roomPrompt` needs a Session-shaped member and would read fields this
-      // record does not have, so this builds the same two pieces from what the record does carry.
-      const note = slot?.note === undefined ? undefined : String(slot.note)
-      const text = note === undefined || note === ''
-        ? `${member.name}, you were called in this round of "${room.name}".`
-        : `[${member.name}] ${note}`
+      // The caller's own name, so the called member reads a prompt that names it the way a local
+      // member's round prompt does, instead of an anonymous instruction.
+      const caller = slot?.by === undefined
+        ? undefined
+        : (room.members ?? []).find(other => other.id === slot.by)?.name
       try {
-        const result = await bridge.send({ workgroupId: hubWorkgroupId, text })
+        const result = await bridge.send({
+          workgroupId: hubWorkgroupId,
+          call: {
+            endpointId,
+            // The round's note, in the same words a local member's slot carries. It is the whole
+            // reason the called member knows what it was asked.
+            ...(slot?.note === undefined ? {} : { note: String(slot.note) }),
+            ...(caller === undefined ? {} : { fromName: caller }),
+            groupName: room.name,
+            // The room id is this MACHINE's name for the group, so it means nothing on another
+            // machine. `workgroupId` is what both sides share.
+            workgroupId: hubWorkgroupId,
+          },
+        })
         return { sent: true, eventId: result.eventId, queued: result.queued === true, memberId: member.id }
       } catch (error) {
         // Reported to the round as a failure so the user sees "could not reach that member" instead

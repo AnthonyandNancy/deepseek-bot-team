@@ -14,6 +14,7 @@ import * as state from './host/state.js'
 import * as ownership from './host/ownership.js'
 import * as tasks from './host/tasks.js'
 import * as taskRunner from './host/task-runner.js'
+import * as handoffs from './host/handoffs.js'
 import * as groups from './host/groups.js'
 import * as hub from './host/hub.js'
 import * as bridge from './host/bridge.js'
@@ -34,7 +35,10 @@ import * as channel from './host/channel.js'
 // Hub that is down cannot slow a startup.
 // `upgrade` installs after `bridge` (an upgrade calls the Hub through it) and before `channel` (the
 // `upgrade-room` endpoint belongs to it).
-const WG_MODULES = [state, ownership, tasks, taskRunner, groups, hub, bridge, upgrade, channel]
+// `handoffs` installs BEFORE groups, the same order the original uses (`index.js`: handoffs, then
+// groups): groups calls `closeWork` when a round that a post waited on ends, so the ledger must
+// already exist. It needs only `wg.state` and this domain's maps, so nothing else constrains it.
+const WG_MODULES = [state, ownership, tasks, taskRunner, handoffs, groups, hub, bridge, upgrade, channel]
 
 export function installWorkgroup(rt) {
   if (rt === undefined || rt === null) throw new Error('ds-bot: installWorkgroup needs the runtime')

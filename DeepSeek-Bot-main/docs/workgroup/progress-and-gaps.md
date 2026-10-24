@@ -3,6 +3,7 @@
 
 - 日期：2026-10-22
 - 水位：**G5 完成**（方案 §14 的 5 条门禁有自动化证据；新增 N1/N2 通过；N3 与门禁 2 的真机一半待人工），未发版
+- 2026-10-23 补：**群内 Bot 交接**（方案 §5.1 的 `host/handoffs.js` 复制件）此前缺失，现已补上；属 G1 复制缺口，非 G5 范围
 
 ## 进度台账
 
@@ -102,6 +103,39 @@
 - `details-drawer.js` 与 `settings.js` 各一处三元：`room.workgroup === true` 走复制件，本地群走原版；
 - 未登录建工作群改为服务端拒绝；「未登录本地可用」由本地群保障；
 - Hub 明文绑定非 loopback 必须显式 `HUB_ALLOW_PLAINTEXT_LAN=1`，否则启动报错（不再静默改回 loopback）。
+
+## 成员进出与群内发言上 Hub（2026-10-23）
+
+用户报三条，都不是 G5，而是 G4/G1 已交付部分里的缺口：
+
+1. 邀请同事、同事同意后，只有他本人进来，管家 Bot 没跟进来；
+2. 同事那边看不到群历史和实时消息；
+3. 建群后再加的 Bot，管家调不动、对话没反应。
+
+根因四处，都已修在 `src/workgroup/` 与 `hub/` 内，`src/host/` 零改动：
+
+| # | 根因 | 位置 | 修法 |
+|---|---|---|---|
+| 1 | 接受邀请只插 `member_type='user'` 一行，从不加入对方的 Bot | `hub/src/workgroups/service.js` `answerInvite` | 新增 `bridge.joinWithPrimaryBot`：接受后发布并加入 `mainBotIds[0]`（团队的管家），只加一个，符合方案 §7.4「登录不等于发布全部 Bot」 |
+| 2 | `addEndpointMember` 只允许 admin，刚加入的人 role 是 `member`，连自己的 Bot 都加不了 | 同上 | 拆成两条规则：加**自己的** Bot 只需是成员；加**别人的** Bot 才要 admin。与 `removeMember` 一贯的写法一致 |
+| 3 | 本机 Bot 的发言从来没上过 Hub——`appendLine` 14 个调用点无一发送，Hub 的 events 表里只有人手打的字，同事拉历史自然几乎空白 | `src/workgroup/host/groups.js` | 新增 `mirrorLine`，在 `postInRound` 与 `postToGroupSession`（含 late 分支）三个真实发言点镜像；带 `hubEventId` 去重，`via:'hub'` 的行不回传，不会成环 |
+| 4 | 群设置「添加成员」只发 id，`updateWorkgroup` 存成 `{id,name}`，**没有 `kind`**；`sessionFor` 与回合判定都按 `kind !== 'localBot'` 当远程处理，回合只往 Hub 发一句「你被点名了」，没人应答 | 同上 | 新增 `localMember(id, given)` 统一补齐 `kind`/`botId`/`name`；Hub 群同时把 Bot 加进 Hub 名册，Hub 拒绝则回滚本地并报错 |
+| 5 | 移除成员只删本地；Hub 端点从 G4 就有却无调用方，下次 `applyRoster` 把成员读回来 | 同上 + `hub.js` | 新增 `leaveMember` 与 `removeFromHub`，`remove`/`members` 两条路径共用；**先调 Hub 再删本地**，拒绝则不删并报错 |
+| 6 | `applyRoster` 的 `same` 只比 id/name/kind：同一成员这次才拿到 `membershipId` 时判为无变化，记录里始终缺这个字段，移除时无 id 可发 | 同上 | 比较扩到全部名册字段（`botId`/`endpointId`/`membershipId`/`role`/`hubUserId`） |
+| 7 | **Hub 工作群里发消息根本不启动回合**：`send-hub` 只交给 Hub 就返回，`receiveRemote` 又刻意不写群 Session（防另一台机器重复开回合），两条都对，叠起来没有任何成员被叫到 | `bridge.js` + `groups.js` | `apply` 加 `mine`；本机消息经 `postToSession` 走本地编辑器同一条路进群 Session；别台机器的行保持不进 |
+
+附带修掉的两个隐性缺陷（不修则第 1 条不生效）：
+
+- `publishBotEndpoints` 直接读 `rt.state.bots`，而 `rt.state` 要 `rt.load()` 之后才有内容——登录瞬间发布遍历到 0 个 Bot，什么都没发布；
+- 同函数写 `wg.state.endpointBots`，但 `wg.load()` 会把 `wg.state` **整体替换**，先写的条目被丢弃（实测 `b` 丢失、`b2` 保留）。
+
+`receiveRemote` 同时改为优先按 `sender.botEndpointId` 归属成员：原先只按 `userId` 匹配，同事的管家 Bot 说的话被画成同事本人的名字，@ 它还得不到人。
+
+**一处有意的行为差异**：Hub 群里加 Bot 失败时**回滚并报错**，不是静默保留。保留下来只会活到下一次名册同步然后消失，那正是「加了 Bot 但管家还是叫不动」且毫无提示的成因。
+
+证据：`ds-bot/test/workgroup-membership.test.js` 7 条（全走 `apiHandle`、真 `workgroup_relay`、真 `session/event`）；六处变异各自被抓（停用接受后加入→2 红；去掉 `kind` 推断→1 红；停用镜像→1 红；停用 `removeFromHub`→2 红；`same` 退回三字段→2 红；停用 `mine`→1 红）。`ds-bot` 1080 tests / 1079 pass / 1 skip / 0 fail，Hub 262 全通过，lint 0 error，`--check` 通过。
+
+> 第 7 项是这一轮真正的根因。前六项修的是「成员怎么进群」，第 7 项是「进群之后谁被叫到」——后者缺了，前者全都不起作用。
 
 ## 已知缺口
 

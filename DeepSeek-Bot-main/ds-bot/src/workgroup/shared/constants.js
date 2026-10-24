@@ -17,6 +17,10 @@ export const WG_TOOLS = {
   // The original registers read_own_chat alongside read_group_chat, and the round prompt
   // tells a member it may look at its own chat, so this domain needs the tool too.
   readOwn: 'workgroup_read_own_chat',
+  // The original's `post_to_group`, copied for this domain (§5.1 lists the group tool set as
+  // an A-class copy). It is also the only producer of a post's `sub`, the work a poster waits
+  // on, so without it a workgroup hand-off could never be closed.
+  post: 'workgroup_post',
 }
 
 // A Workgroup RPC route of its own: /api/bot belongs to the original channel.

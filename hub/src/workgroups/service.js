@@ -74,6 +74,12 @@ export const HISTORY_KEYS = [
 // later that the field they believed was published never was.
 export const CREATE_FIELDS = new Set(['name', 'notice', 'avatar', 'upgradeId', 'endpointIds'])
 
+// The settings a group may change AFTER it exists. A closed allow-list, for the same reason
+// `CREATE_FIELDS` is one: an unfamiliar field is a client bug worth naming now, not a value that
+// silently never travels. `avatar` and `upgradeId` are absent — the first is not exposed by any
+// client yet, and the second is the idempotency key of a create, not a setting.
+export const SETTINGS_FIELDS = new Set(['name', 'notice'])
+
 export const MAX_NAME_LENGTH = 120
 export const MAX_NOTICE_LENGTH = 4000
 
@@ -90,6 +96,7 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
 
   const byId = stmt('SELECT * FROM workgroups WHERE id = ?')
   const byUpgrade = stmt('SELECT * FROM workgroups WHERE upgrade_id = ?')
+  const writeSettings = stmt('UPDATE workgroups SET name = ?, notice = ?, config_version = config_version + 1 WHERE id = ?')
   const insertGroup = stmt(`INSERT INTO workgroups
     (id, owner_user_id, name, notice, avatar, config_version, last_seq, upgrade_id, created_at)
     VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)`)
@@ -454,14 +461,76 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
       return { inviteId: invite.id, status: 'accepted', workgroupId: invite.workgroup_id }
     },
 
+    // ── POST /v1/workgroups/:id/settings ────────────────────────────────────────────
+    // A group's own settings — the name and the notice — changed by somebody in it.
+    //
+    // Why this has to exist: `name` and `notice` are the only two settings the Hub stores, and every
+    // machine copies them onto its local room (`ensureLinkedGroup`). Until this route, the copy was
+    // ONE WAY. A rename or a new notice changed one machine's record, the Hub kept the old value,
+    // and the next roster read put the old one back — the reported 「设置改了又变回去」. The Hub has to
+    // hear the change or it is not a shared setting at all.
+    //
+    // What it deliberately does NOT accept: reply mode, admin, folder, permission. Those are local by
+    // design (the Hub has no column for them), and `CREATE_FIELDS` refuses them by name, so this
+    // route has the same closed allow-list rather than a wider one nobody validated.
+    //
+    // Who may: the owner or an admin, the same rule `invite` and a foreign `addEndpointMember` use.
+    // A name is not a message, so it is written synchronously and no `events` row is added — the
+    // roster notification is enough to make every connected machine re-read it.
+    async updateSettings({ userId, deviceId, workgroupId, body }) {
+      const { group, membership } = requireMember(workgroupId, userId)
+      if (membership.role !== 'owner' && membership.role !== 'admin') {
+        throw forbidden('workgroup/not-admin', 'Only the group owner or an admin may change its settings.')
+      }
+      for (const key of Object.keys(body ?? {})) {
+        if (!SETTINGS_FIELDS.has(key)) {
+          throw badRequest(
+            'workgroup/unsupported-field',
+            `"${key}" is not a workgroup setting this Hub stores. Allowed: ${[...SETTINGS_FIELDS].join(', ')}.`,
+          )
+        }
+      }
+      const next = {}
+      if (body?.name !== undefined) {
+        const name = text(body.name, 'The group name', MAX_NAME_LENGTH)
+        if (name.length === 0) throw badRequest('workgroup/invalid-field', 'A group needs a name.')
+        next.name = name
+      }
+      if (body?.notice !== undefined) next.notice = body.notice === null ? '' : text(body.notice, 'The notice', MAX_NOTICE_LENGTH)
+      if (Object.keys(next).length === 0) return { workgroupId, changed: false, workgroup: publicGroup(group) }
+
+      // `config_version` is bumped so a client holding a cached copy can tell it is stale. The
+      // column has existed since the first migration and this is the first writer.
+      writeSettings.run(next.name ?? group.name, next.notice ?? group.notice, workgroupId)
+      audit.record({ actorId: userId, deviceId, action: 'workgroup.settings', targetId: workgroupId, result: Object.keys(next).join(',') })
+      membershipChanged({ workgroupId, kind: 'settings' })
+      return { workgroupId, changed: true, workgroup: publicGroup(byId.get(workgroupId)) }
+    },
+
     // ── POST /v1/workgroups/:id/members ──────────────────────────────────────────────
     // Adds a Bot endpoint to the group. Endpoint ids are not secrets, so the group's own members
     // are the shortlist: `endpointFor` also requires the endpoint's owner to be in this group, so
     // an id learned elsewhere cannot pull a stranger's Bot in.
+    //
+    // WHO MAY — two rules, and the second one is the fix for a worked-around-as-a-feature bug.
+    //
+    // Adding somebody ELSE's Bot needs admin, which is `requireAdmin`. Adding your OWN Bot needs
+    // only that you are in the group: it is your Bot, on your machine, and you are the only person
+    // who can decide it joins. Before this, `requireAdmin` was applied to both, so a colleague who
+    // accepted an invitation (role `member`, by definition) could not bring a single one of their
+    // own Bots with them — every join produced a group in which the new person had no Bot at all.
+    // `removeMember` below has always split the same two cases exactly this way.
     async addEndpointMember({ userId, deviceId, workgroupId, endpointId, endpointService }) {
-      const { group } = requireAdmin(workgroupId, userId)
+      const { group } = requireMember(workgroupId, userId)
       const endpoint = endpointService.endpointFor({ endpointId, workgroupId })
       if (endpoint === undefined) throw notFound('workgroup/endpoint-unknown', 'No such published Bot endpoint is available to this group.')
+      const mine = endpoint.owner_id === userId
+      if (!mine) {
+        const membership = membershipOf.get(workgroupId, userId)
+        if (membership?.role !== 'owner' && membership?.role !== 'admin') {
+          throw forbidden('workgroup/not-admin', 'Only the group owner, an admin, or the Bot\'s own owner may add this Bot.')
+        }
+      }
 
       const existing = existingMember.get(workgroupId, 'botEndpoint', '', endpoint.id)
       if (existing !== undefined && existing.status === 'active') {
@@ -483,6 +552,11 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
         throw error
       }
       audit.record({ actorId: userId, deviceId, action: 'workgroup.member-add', targetId: id, result: endpoint.id })
+      // The other machines re-read the roster at once. Without this the Bot was a member on the
+      // Hub and on the machine that added it, while every colleague kept the roster they last
+      // read — so a Bot that had just joined could not be addressed by name anywhere else.
+      // Same notification `answerInvite` sends, for the same reason.
+      membershipChanged({ workgroupId, kind: 'joined', userId: endpoint.owner_id, endpointId: endpoint.id, membershipId: id })
       return { membership: publicMember(stmt('SELECT * FROM memberships WHERE id = ?').get(id)), created: true, groupName: group.name }
     },
 

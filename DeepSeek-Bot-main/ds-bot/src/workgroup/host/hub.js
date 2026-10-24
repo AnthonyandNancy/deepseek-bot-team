@@ -415,6 +415,21 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
       const token = await ensureAccess()
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/delete`, { body: {}, token })
     },
+    // A group's name and notice, changed for everyone.
+    //
+    // The two settings the Hub stores. Sending them is what makes a rename stick on the other
+    // person's machine: without it the local record changed, the Hub kept the old value, and the
+    // next roster read put it back.
+    async updateGroupSettings({ workgroupId, name, notice }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/settings`, {
+        body: {
+          ...(name === undefined ? {} : { name }),
+          ...(notice === undefined ? {} : { notice }),
+        },
+        token,
+      })
+    },
     async invite({ workgroupId, phone, hubUserId }) {
       const token = await ensureAccess()
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/invites`, {
@@ -448,6 +463,33 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
       const token = await ensureAccess()
       return call(address(), '/v1/bot-endpoints', {
         body: { localBotId, name, ...(capabilities === undefined ? {} : { capabilities }), ...(visibility === undefined ? {} : { visibility }) },
+        token,
+      })
+    },
+    // Puts one published Bot endpoint into a group's roster.
+    //
+    // The Hub has had this route since G4 (`POST /v1/workgroups/:id/members`) and NOTHING called
+    // it: publishing a Bot made it addressable to people who were already in a group with you, and
+    // there was no way to bring one into a group you had just joined. So an invited colleague
+    // arrived alone — the person was a member and their Bot was not — and a Bot added to a group
+    // after it was made was never put into the roster at all.
+    async addEndpointMember({ workgroupId, endpointId }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/members`, {
+        body: { endpointId },
+        token,
+      })
+    },
+    // Takes one membership out of a group's roster.
+    //
+    // The Hub has had this route since G4 as well (`POST .../members/:id/leave`), and nothing called
+    // it either — so 「移除成员」 removed the row on this machine and the next roster read put it
+    // straight back. Removing has to reach the Hub for the same reason adding does: the Hub owns the
+    // roster, and anything this machine believes alone is overwritten.
+    async leaveMember({ workgroupId, membershipId }) {
+      const token = await ensureAccess()
+      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/members/${encodeURIComponent(membershipId)}/leave`, {
+        body: {},
         token,
       })
     },

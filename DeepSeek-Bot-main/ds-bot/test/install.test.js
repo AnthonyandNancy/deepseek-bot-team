@@ -128,6 +128,9 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'prompt workgroup-relay 641',
     'effect ds-bot: workgroup step lines',
     'tool workgroup_relay',
+    // The original's `post_to_group`, copied for this domain. It is what opens a post's work
+    // (`sub`), so a workgroup hand-off can be closed and the poster brought back to it.
+    'tool workgroup_post',
     'tool read_workgroup_chat',
     'tool workgroup_read_own_chat',
     'on session/event',

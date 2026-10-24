@@ -59,9 +59,24 @@
 | 运行统计 `run-stats` | 只按 Bot id | 同上 | 不适用 |
 | Hub 群/消息持久化 | — | 无 | **G4** |
 | 群记忆的跨用户授权与 Hub 存储 | — | 无 | **G6** |
+| **Bot 之间的交接与结果回报** | `host/handoffs.js` + `post_to_group` 的 `report_back` | `host/handoffs.js` 复制件 + `workgroup_post`（2026-10-23 补齐） | 已复制 |
 
 ## 5. 剩余差异（不是复制问题）
 
 1. **工作群没有自己的 Hub 侧群与消息**：跨用户聊天、升级真正生效属 G4。
 2. **群记忆只做到本机面板可用**：跨用户检索、来源与授权属 G6。
 3. **工作群的 `run-stats` / `chat`**：原版这两个端点按 Bot id 解析，群从来不用它们（群是 DSH 会话），因此工作群也不使用。
+
+## 6. 已闭环（本轮之前是缺口）
+
+- **工作群没有 Bot 之间的交接**（2026-10-23 修复）：`host/handoffs.js` 的复制件此前
+  不存在；成员的 post 进不了 round；round 放手的成员不再发结果。四处一并补上，详见
+  `g5/ROUND-LOG.md` 同日条目。
+- **成员进出与群内发言上 Hub**（2026-10-23 修复）：接受邀请只加了人、群里加了 Bot 也不带
+  `kind`、本机 Bot 的发言从不进 Hub 的 events 表；后续核对时又补上对称的另一半——移除成员
+  原本只删本地，Hub 名册不动，下次 `applyRoster` 又读回来。详见 `progress-and-gaps.md` 与
+  `gates.md` 的同日条目。`src/host/` 仍零改动。
+- **Hub 工作群里发消息不启动回合**（2026-10-23 修复，本轮最终根因）：`send-hub` 只交给 Hub，
+  `receiveRemote` 又刻意不写群 Session——两条各自正确的规则叠加，结果是没有任何成员被叫到。
+  原版本地群没有 Hub 夹在中间，编辑器直接 prompt 群 Session，所以正常。修法是让本机消息经
+  `postToSession` 走本地编辑器同一条路（`apply` 的 `mine`），别台机器的行仍不进 Session。

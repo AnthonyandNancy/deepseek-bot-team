@@ -173,6 +173,50 @@ export function install(wg) {
     room.log = log.slice(-WG_LOG_MAX)
   }
 
+  // A line this machine produced, put on the Hub as well.
+  //
+  // THE GAP THIS CLOSES. G4 made the Hub the group's record: what the user types goes up
+  // (`send-hub`), and what another machine says comes down (`receiveRemote`). What a LOCAL BOT says
+  // never went up at all — `appendLine` has fourteen callers and not one of them sent anything — so
+  // a workgroup whose conversation is mostly Bots had a Hub log containing only the humans' lines.
+  // A colleague who joined afterwards pulled that and saw an almost empty group: 「同事加入后，
+  // 群历史消息包括现有实时消息没显示」. It was not a pull problem; there was nothing to pull.
+  //
+  // Two rules keep it from becoming noise or a loop:
+  //   * only called for lines a Bot or the user actually SAID (`postInRound`, `postToGroupSession`,
+  //     the user's own line) — never for markers like `stopped`/`resumed`/`done`, which describe a
+  //     round on one machine and are not conversation;
+  //   * the Hub's `eventId` is recorded ON the log line (`hubEventId`), so the ack and any later
+  //     replay are recognised by `receiveRemote`'s dedup instead of being drawn again.
+  //
+  // Signed out, a group without a Hub id, or a bridge that is not connected does nothing: a local
+  // group and an offline workgroup behave exactly as before.
+  const mirrorLine = (room, line) => {
+    if (room.hubWorkgroupId === undefined) return
+    if (wg.bridge?.status?.().connected !== true) return
+    const text = String(line.text ?? '')
+    if (text === '') return
+    // A line that came FROM the Hub is already there; sending it back would loop it around.
+    if (line.via === 'hub') return
+    const eventId = `evt_${randomUUID().replace(/-/g, '')}`
+    line.hubEventId = eventId
+    // A Bot's line names its endpoint when this machine published one, so the Hub can attribute the
+    // author to the Bot rather than to the person whose machine ran it.
+    const endpointId = line.memberId === undefined
+      ? undefined
+      : Object.entries(wg.bridge?.endpointBots?.() ?? wg.state?.endpointBots ?? {})
+        .find(([, botId]) => String(botId) === String(line.memberId))?.[0]
+    void Promise.resolve()
+      .then(() => wg.bridge.send({
+        workgroupId: room.hubWorkgroupId,
+        text,
+        eventId,
+        ...(endpointId === undefined ? {} : { botEndpointId: endpointId }),
+      }))
+      .catch(error => rt.warn('ds-bot: a line in "%s" did not reach the Hub: %s', room.name, error?.message ?? error))
+  }
+  wg.mirrorLine = mirrorLine
+
   const unseenLines = (room, memberId) => {
     const since = room.seen[memberId]
     if (since === undefined) return room.log.slice(-WG_FIRST_LOOK)
@@ -194,6 +238,27 @@ export function install(wg) {
   wg.mentionsIn = mentionsIn
   wg.isPass = isPass
   wg.stripOwnName = stripOwnName
+
+  // COPY OF THE ORIGINAL (`worksOf`, src/host/tools.js:114): the works (handoffs.js) the
+  // calling turn does — what it answers, and the requests that joined it. The original reads
+  // `rt.live`; a workgroup member Session is never in that map, so this domain's own `wg.live`
+  // answers. Read through `wg.workOf`, so it is this domain's ledger or nothing.
+  const worksOf = (exec) => {
+    const turn = wg.live?.get(exec.agent?.id)
+    return [wg.workOf?.(turn?.info), ...(turn?.joined ?? []).map(joined => wg.workOf?.(joined.info))].filter(Boolean)
+  }
+  wg.worksOf = worksOf
+
+  // A member record by member id, whichever kind it is. `rt.botOf` knows the local Bots and
+  // says nothing about a Hub person or a remote endpoint, so a name lookup that only asked it
+  // printed "undefined" for exactly the members a workgroup adds.
+  wg.workgroupBotOf = (id) => {
+    for (const room of Object.values(wg.state?.workgroups ?? {})) {
+      const member = (room.members ?? []).find(other => other.id === id)
+      if (member !== undefined) return member
+    }
+    return undefined
+  }
 
   // A workgroup is created locally in G1 and linked to a Hub group later (G4). The
   // record lives in workgroup/state.json, never in the original state.rooms.
@@ -500,13 +565,24 @@ export function install(wg) {
     // nobody on a bad sync.
     const adminId = ownerMember?.id ?? mainBot?.id ?? answerable[0]?.id ?? (room.adminId ?? null)
 
+    // Written only when it changed: every event would otherwise touch state.json, and a group with
+    // traffic would rewrite the file on each message.
+    //
+    // The comparison has to cover EVERY field the roster supplies, not just the three it draws.
+    // `membershipId` is what the Hub is asked to remove a member by, and it arrives on the same
+    // response as the name; a Bot added in this session looked identical to the already-recorded
+    // roster under the old three-field test, so the early return kept a record with no
+    // `membershipId` — and 「移除成员」 then had no id to send.
     const same = (room.members ?? []).length === next.length
       && (room.members ?? []).every((member, index) => member.id === next[index]?.id
         && member.name === next[index]?.name
-        && member.kind === next[index]?.kind)
+        && member.kind === next[index]?.kind
+        && member.botId === next[index]?.botId
+        && member.endpointId === next[index]?.endpointId
+        && member.membershipId === next[index]?.membershipId
+        && member.role === next[index]?.role
+        && member.hubUserId === next[index]?.hubUserId)
       && room.adminId === adminId
-    // Written only when it changed: every event would otherwise touch state.json, and a group with
-    // traffic would rewrite the file on each message.
     if (same) return room
     const previous = room.members ?? []
     room.members = next
@@ -605,6 +681,53 @@ export function install(wg) {
   // Rename, notice, admin and membership changes. The original does this in
   // roster.js's planRoomChange/updateRoom; here it is one small function because a
   // Workgroup's members come from the Hub later (G4) and are not local Bots.
+  // A member record built from an id the composer sent.
+  //
+  // `kind` IS NOT OPTIONAL, and the composer only ever sends an id. A plain `{ id, name }` record
+  // fails every `kind` test in this file: `sessionFor` returns `undefined` for anything that is not
+  // `'localBot'` (plan §8.3's no-fake-remote-Session rule), and the round hands such a member to
+  // `wg.deliverRemote` instead of running its turn here. So a Bot added through 「添加成员」 became a
+  // member the group could @ but never answer with: the round posted "you were named" at the Hub and
+  // nothing came back, while the same Bot added at CREATE time talked normally. That is
+  // 「先建群后邀请新的 Bot 进群，管家无法调用和对话这个新 Bot」.
+  //
+  // A local Bot when this machine has it, otherwise a Hub person. A stranger's Bot is never added
+  // here: only its owner may put it in a group, and that happens on the Hub.
+  const localMember = (id, given) => {
+    const record = given !== null && typeof given === 'object' ? { ...given } : { id }
+    const known = rt.botOf?.(id)
+    if (record.name === undefined && known !== undefined) record.name = known.name
+    if (record.kind === undefined) record.kind = known !== undefined ? 'localBot' : 'user'
+    if (record.kind === 'localBot' && record.botId === undefined) record.botId = id
+    return record
+  }
+
+  // Takes members off a HUB group's roster, and refuses rather than pretending.
+  //
+  // `applyRoster` replaces `room.members` from the Hub whenever the roster is read, so deleting a row
+  // only on this machine is undone by the next read: 「移除成员，过一会又回来了」. The mirror of
+  // `joinWithPrimaryBot`, and it has to exist for the same reason — an add that reaches the Hub and a
+  // remove that does not is a group whose member list only ever grows.
+  //
+  // The throw is deliberate. A Hub refusal leaves the local list exactly as it was, so the settings
+  // form can say what happened; deleting here first and failing later would show a member gone from a
+  // group they are still in.
+  const removeFromHub = async (room, members) => {
+    if (room.hubWorkgroupId === undefined) return
+    for (const member of members) {
+      if (member === undefined) continue
+      // Only a Bot of this team: a Hub person leaves with their own account, and another team's Bot
+      // belongs to its owner. `leaveMember` enforces the same rule on the Hub's side.
+      if (member.kind !== 'localBot' || member.membershipId === undefined) continue
+      const failed = await wg.bridge?.leaveMember?.({ workgroupId: room.hubWorkgroupId, membershipId: member.membershipId })
+        .then(() => undefined)
+        .catch(error => error)
+      if (failed !== undefined) {
+        throw new Error(`"${room.name}" lives on the Hub, and ${member.name} was not removed there: ${failed?.message ?? failed}. Try again when the Hub is reachable.`)
+      }
+    }
+  }
+
   async function updateWorkgroup(roomId, patch = {}, actorId) {
     await wg.load()
     const room = wg.workgroupOf(roomId)
@@ -696,11 +819,15 @@ export function install(wg) {
       for (const member of patch.members) {
         const id = member !== null && typeof member === 'object' ? member.id : member
         if (id === undefined || id === null || kept.some(other => other.id === id)) continue
-        kept.push(room.members.find(other => other.id === id) ?? (typeof member === 'object' ? { ...member } : { id }))
+        // The same `kind` gap `add` has: a bare id here used to become `{ id }`, which no `kind`
+        // test in this file accepts as a local Bot. `localMember` fills it in one place.
+        kept.push(room.members.find(other => other.id === id) ?? localMember(id, member))
       }
-      // A member taken off the list loses its Session, the way `remove` below does it.
-      for (const member of room.members) {
-        if (kept.some(other => other.id === member.id)) continue
+      // A member taken off the list loses its Session, the way `remove` below does it — and, for a
+      // Hub group, loses its membership on the Hub too, or `applyRoster` puts it back.
+      const gone = room.members.filter(member => !kept.some(other => other.id === member.id))
+      await removeFromHub(room, gone)
+      for (const member of gone) {
         const sessionId = room.sessions?.[member.id]
         if (sessionId !== undefined) {
           wg.releaseSessionOwner(sessionId)
@@ -716,6 +843,12 @@ export function install(wg) {
     // member IDS, exactly as the original's do — the settings form is the original form
     // and sends `{ add: [id] }`. This used to read `member.id` off each entry, so a plain
     // id added nobody and the member row the form drew was a phantom.
+    //
+    // A member of a HUB group is removed on the Hub as well, and that is not symmetric decoration:
+    // `applyRoster` replaces `room.members` from the Hub on every membership change, so a row deleted
+    // only here came back on the next read — 「移除成员，过一会又回来了」. The Hub call goes FIRST so its
+    // refusal leaves the local list untouched, instead of deleting here and silently reverting later.
+    await removeFromHub(room, (patch.remove ?? []).map(memberId => room.members.find(other => other.id === memberId)))
     for (const memberId of patch.remove ?? []) {
       const at = room.members.findIndex(member => member.id === memberId)
       if (at === -1) continue
@@ -729,13 +862,21 @@ export function install(wg) {
       delete room.seen[memberId]
       if (room.adminId === memberId) room.adminId = room.members[0]?.id ?? null
     }
+    const addedToHub = []
+    // What the member list looked like before this call, so a Hub refusal can put it back exactly.
+    const membersBeforeAdd = room.members.map(member => ({ ...member }))
     for (const member of patch.add ?? []) {
       // An id, as the original takes it, OR a record, which is what the composer sends.
       const id = member !== null && typeof member === 'object' ? member.id : member
       if (id === undefined || id === null) continue
       if (room.members.some(other => other.id === id)) continue
-      const known = rt.botOf?.(id)
-      room.members.push(typeof member === 'object' ? { ...member } : { id, ...(known ? { name: known.name } : {}) })
+      // `kind` IS NOT OPTIONAL, and the composer only ever sends an id — see `localMember`.
+      const record = localMember(id, member)
+      room.members.push(record)
+      // A group that lives on the Hub keeps its roster there. Recording the member only here left
+      // the added Bot in a roster no other machine had — and the next roster read (`applyRoster`)
+      // replaced `room.members` wholesale, so the Bot vanished even from here.
+      if (room.hubWorkgroupId !== undefined && record.kind === 'localBot') addedToHub.push(String(id))
     }
     // COPY OF THE ORIGINAL (`followMemberNames`, src/host/roster.js:303): a group the user
     // did NOT name is named after its members, so it follows them. The original skips a
@@ -748,6 +889,29 @@ export function install(wg) {
       room.name = autoWorkgroupName(room.members, room.createdAt ?? Date.now())
     }
     await wg.save()
+    // The Hub learns about the Bots added here, one publish-and-add per Bot.
+    //
+    // A Hub group's roster comes FROM the Hub: `applyRoster` replaces `room.members` on every
+    // membership change, so a member recorded only here is a member that disappears the moment the
+    // roster is next read. Adding it on the Hub is what makes it real for everyone, this machine
+    // included.
+    //
+    // So a refusal UNDOES the local edit and is reported. Keeping the member locally would be the
+    // worse answer: the Bot would work until the next sync and then silently vanish, which is the
+    // 「加了 Bot 但管家还是叫不动」 symptom with no explanation attached.
+    if (addedToHub.length > 0) {
+      const asked = await wg.bridge?.joinWithPrimaryBot?.({ workgroupId: room.hubWorkgroupId, botIds: addedToHub })
+        .then(added => ({ added: added ?? [] }))
+        .catch(error => ({ error }))
+      const failed = asked?.error ?? ((asked?.added ?? []).length === addedToHub.length
+        ? undefined
+        : new Error('the Hub did not accept every Bot'))
+      if (failed !== undefined) {
+        room.members = membersBeforeAdd
+        await wg.save().catch(() => {})
+        throw new Error(`"${room.name}" lives on the Hub, and the Hub did not accept ${addedToHub.length > 1 ? 'those Bots' : 'that Bot'}: ${failed?.message ?? failed}. Connect to the Hub and try again.`)
+      }
+    }
     // COPY OF THE ORIGINAL (`updateRoom`, src/host/roster.js:459): "if (room.name !==
     // before) { changes.push(`renamed it …`); await retitleRoom(room) }".
     //
@@ -758,6 +922,33 @@ export function install(wg) {
     // for a group called 阿松大, because that was the Session's title, not the group's
     // name. The original keeps the two in step on every rename; so does this now.
     if (room.name !== before) await retitleWorkgroup(room)
+    // THE HUB LEARNS THE NAME AND THE NOTICE, because they are the two settings it stores.
+    //
+    // A workgroup's title and notice live on the Hub (`workgroups.name` / `workgroups.notice`), and
+    // `ensureLinkedGroup` copies them onto every other machine — that is how two people see the same
+    // group title. But nothing ever wrote them BACK: a rename or a new notice changed this machine's
+    // record, the Hub kept the old value, and the next roster read (or the next start) put the old
+    // one straight back. That is what 「设置改了又变回去」 is.
+    //
+    // The other settings — reply mode, admin, folder, permission — are deliberately NOT sent: the Hub
+    // has no column for them and refuses a create body carrying anything outside `CREATE_FIELDS`, so
+    // they stay local by design rather than by omission.
+    if (room.hubWorkgroupId !== undefined && (room.name !== before || patch.notice !== undefined)) {
+      const pushed = await Promise.resolve()
+        .then(() => wg.bridge.updateGroupSettings({
+          workgroupId: room.hubWorkgroupId,
+          ...(room.name !== before ? { name: room.name } : {}),
+          ...(patch.notice !== undefined ? { notice: room.notice ?? '' } : {}),
+        }))
+        .then(() => undefined)
+        .catch(error => error)
+      // Reported, never silently swallowed. The local change is already saved and the next roster
+      // read adopts the Hub's value, so a failure here means the change will REVERT — the settings
+      // page has to say so rather than let the user watch it undo itself.
+      if (pushed !== undefined) {
+        throw new Error(`"${room.name}" was changed here, but the Hub did not accept the change: ${pushed?.message ?? pushed}. It would revert on the next sync, so connect to the Hub and try again.`)
+      }
+    }
     return room
   }
   wg.updateWorkgroup = updateWorkgroup
@@ -959,17 +1150,150 @@ export function install(wg) {
   // the chat looks up to draw the avatar and the name.
   async function postToGroupSession(room, member, text, extra = {}) {
     if (text === '') return
+    // COPY OF THE ORIGINAL (`postToRoom`, src/host/groups.js:696-719): while a round runs, the
+    // post goes into the group's log and that round's replies at once, so it is not held back
+    // until the round ends; the relay it still opens does not write it again (`extra.logged`).
+    //
+    // This was missing, and it is why a member's late result never appeared. A member that
+    // outlived its slot ends its turn after the round let go of it, so there was no round to
+    // add a reply to — and nothing else in this domain writes the log. The line reached the
+    // group's Session (the relay path) but not the log the chat draws from, so the group looked
+    // as if the member never finished. A local group never had this problem: `postToRoom`
+    // always wrote the log line for a post.
+    let logged
+    const running = [...wg.roomProgress.values()].find(round => round.roomId === room.id)
+    // A result that came back after the round let go of its member (`extra.late`) has no round
+    // to join, and in a workgroup nothing else is guaranteed to run afterwards: the relay only
+    // fires when the user or a member posts. The original leaves such a line to the next relay;
+    // here it would sit invisible until the user happened to speak, which is exactly what "it
+    // stopped responding" looked like. So a late line is written straight into the log.
+    if (running === undefined && extra.late === true && text !== '') {
+      appendLine(room, { who: member.name, memberId: member.id, text })
+      mirrorLine(room, room.log.at(-1))
+      await wg.save().catch(() => {})
+      logged = room.seq
+    }
+    if (running !== undefined) {
+      if (extra.failed !== undefined) {
+        // A failed model call is an event of the round only: no log line, as the relay does it.
+        const { code, status, message } = extra.failed
+        running.failed.push(member.name)
+        running.replies.push({ kind: 'failed', botId: member.id, name: member.name, code, ...(status ? { status } : {}), text: message, time: Date.now() })
+        logged = true
+      } else if (extra.resumed === true || extra.stopped === true || extra.done === true) {
+        const kind = extra.done === true ? 'done' : extra.stopped === true ? 'stopped' : extra.again === true ? 'cut' : 'resumed'
+        appendLine(room, { who: member.name, memberId: member.id, kind, text: '' })
+        running.replies.push({ kind, botId: member.id, name: member.name, time: Date.now() })
+        logged = room.seq
+      } else {
+        appendLine(room, { who: member.name, memberId: member.id, text })
+        mirrorLine(room, room.log.at(-1))
+        running.replies.push({ botId: member.id, name: member.name, text, time: Date.now() })
+        logged = room.seq
+      }
+      await wg.save().catch(() => {})
+    }
     const agent = await rt.resolveAgent(room.id)
     if (agent === undefined) return
     const message = createUserMessage({
       content: [{ type: 'text', text: `[Workgroup post from ${member.name}]\n${text}` }],
-      source: { kind: WG_SOURCE_KIND, form: 'relay', role: 'post', exchangeId: randomUUID(), senderName: member.name, senderSessionId: member.id, roomId: room.id, ...extra },
+      source: { kind: WG_SOURCE_KIND, form: 'relay', role: 'post', exchangeId: randomUUID(), senderName: member.name, senderSessionId: member.id, roomId: room.id, ...extra, ...(logged !== undefined ? { logged } : {}) },
     })
     if (typeof agent.followup === 'function') agent.followup(message)
     else await ctx.sessionController.prompt({ sessionId: room.id, mode: 'queue', content: message.content, source: message.source })
     await ctx.sessions?.flush?.(agent.session)
   }
   wg.postToGroupSession = postToGroupSession
+
+  // Calls this machine has already run a turn for, so a Hub replay of the same call does not
+  // produce a second turn. Bounded the way `stoppedExchanges` is: a call older than this is far
+  // outside any replay window the Hub keeps.
+  const calledEvents = new Set()
+  const CALLED_KEPT = 200
+
+  // A CALL FROM ANOTHER MACHINE'S ROUND: one of THIS machine's Bots was asked to answer.
+  //
+  // This is the missing half of cross-user conversation. `deliverRemote` used to post
+  // "「Name」, you were called in this round" up to the Hub as an ordinary `chat.message` — and
+  // nothing anywhere turned it into a turn. On the called member's machine it landed in
+  // `receiveRemote`, which deliberately keeps Hub lines OUT of the group's Session (so a second
+  // machine does not answer the same conversation twice), and that is right for a line somebody
+  // SAID and wrong for an instruction. So the colleague's butler Bot received an "@" and never ran.
+  // A local group never had this problem: the round calls every member's Session itself.
+  //
+  // The split is by AUTHORSHIP, which is the rule the rest of this file already follows: a line a
+  // member said is the Hub's copy of something this machine cannot re-derive, and a call is not
+  // something anybody said — it is this machine's own turn to run, addressed to this machine.
+  //
+  // Only the machine that owns the endpoint answers. Every member of the group receives the same
+  // event, so the guard is what keeps a call with `endpointId: ep_bob` from being run by Alice as
+  // well; `endpointBots` is this machine's own publish map, and a Bot missing from it is not ours.
+  async function receiveCall({ room, call, event }) {
+    const endpointId = typeof call?.endpointId === 'string' ? call.endpointId : undefined
+    if (endpointId === undefined) return false
+    const localBotId = wg.bridge?.endpointBots?.()?.[endpointId] ?? wg.state?.endpointBots?.[endpointId]
+    // Not ours, or no longer a Bot of this team: either way this machine has no turn to run.
+    if (localBotId === undefined || rt.botOf(localBotId) === undefined) return false
+    const member = (room.members ?? []).find(other => other.id === localBotId || other.botId === localBotId)
+    // The roster has not caught up (a Bot just added, or a signal from before the sync): a turn for
+    // a member this room does not list would post under a name nobody can @, so it waits for the
+    // roster instead. The next call arrives once `applyRoster` has run.
+    if (member === undefined) return false
+    // A replay of a call already answered must not run a second turn for it.
+    if (event?.eventId !== undefined && calledEvents.has(event.eventId)) return false
+    if (event?.eventId !== undefined) {
+      if (calledEvents.size >= CALLED_KEPT) calledEvents.delete(calledEvents.values().next().value)
+      calledEvents.add(event.eventId)
+    }
+    // THE TURN RUNS OFF THE HUB'S PATH. `receiveRemote` is awaited by the bridge's pull, which holds
+    // the group's cursor until it returns; waiting here for a model turn would stop this machine
+    // from receiving anything else in the group for as long as the called Bot works. The round the
+    // caller is running does not wait for it either — a remote member's answer arrives later, as an
+    // ordinary line, exactly as it does for a local member that outlived its slot.
+    void runCall(room, member, call).catch(error => rt.warn('ds-bot: called Bot %s in "%s" failed: %s', member.name, room.name, error?.message ?? error))
+    return true
+  }
+  wg.receiveCall = receiveCall
+
+  // The turn itself, for one Bot called from another machine's round.
+  async function runCall(room, member, call) {
+    // The same Session a local round would use, so the member's memory of this group is the one it
+    // already has rather than a fresh one per call.
+    const session = await sessionFor(room, member)
+    if (session === undefined) return
+    await loadLines(room)
+    // The prompt is assembled here rather than taken from the caller, because only this machine
+    // knows the member's Session, its `seen` cursor and the group's log. It is the same shape a
+    // local member's round prompt has: who else is in the group, what was said since it last
+    // spoke, and what it was called for.
+    const note = typeof call?.note === 'string' && call.note !== '' ? call.note : `you were called in this round of "${room.name}"`
+    const from = typeof call?.fromName === 'string' && call.fromName !== '' ? call.fromName : undefined
+    const round = { roomId: room.id, members: room.members, startSeq: room.seq + 1, slots: [], replies: [], passed: [], failed: [], started: [], speaking: null, turns: 0 }
+    // Registered while it runs, so 「停止」 stops this turn too — on the machine whose Bot is
+    // actually working, which is the only machine where stopping it means anything.
+    const callId = `call-${randomUUID()}`
+    wg.roomProgress.set(callId, round)
+    try {
+      const lines = unseenLines(room, member.id)
+      const peers = (room.members ?? []).filter(other => other.id !== member.id && other.kind !== 'user').map(other => other.name)
+      const text = [
+        `Members: the user${peers.length ? `, ${peers.join(', ')}` : ''} and you.`,
+        room.notice ? `Group notice (shared instructions for every member):\n${room.notice}` : '',
+        lines.length ? `Since your last message in the group (oldest first):\n${transcript(lines, memberText(room))}` : '',
+        from === undefined ? `You were called: ${note}` : `${from} called you: ${note}`,
+        ROOM_REPLY,
+      ].filter(Boolean).join('\n\n')
+      // `role: 'room'` is what `turn/end` reads to route the result: the answer is posted with
+      // `postInRound`, which mirrors it to the Hub, and the caller's machine draws it through the
+      // ordinary `receiveRemote` path. That is the whole return journey.
+      const reply = await roomTurn(room, member, session.id, { text, files: [] }, note, new AbortController().signal, round, undefined, [])
+      if (typeof reply === 'string' && !isPass(reply) && reply.trim() !== '') postInRound(room, round, member, reply.trim())
+    } finally {
+      wg.roomProgress.delete(callId)
+      await wg.save().catch(() => {})
+    }
+  }
+  wg.runCall = runCall
 
   // A message that came from another device, in through the bridge (host/bridge.js).
   //
@@ -982,7 +1306,7 @@ export function install(wg) {
   // The sender is never resolved to a local Bot: a remote line is another person's, and
   // `senderSessionId` is left to the member id the Hub assigned so the avatar and the name
   // are the ones the member list already shows.
-  async function receiveRemote({ workgroupId, event }) {
+  async function receiveRemote({ workgroupId, event, mine = false }) {
     await wg.load()
     const room = roomOfHubGroup(workgroupId) ?? wg.workgroupOf(workgroupId)
     if (room === undefined) return false
@@ -991,6 +1315,9 @@ export function install(wg) {
     // already has this event and is refused here, which is what makes "at least once" invisible.
     if (event?.eventId !== undefined && (room.log ?? []).some(line => line.hubEventId === event.eventId)) return false
     const payload = event?.payload ?? {}
+    // A CALL, NOT A LINE. Another machine's round called one of THIS machine's Bots: the message
+    // carries `call` and no text, and it never becomes a log line — it becomes that Bot's turn.
+    if (payload.call !== undefined) return receiveCall({ room, call: payload.call, event })
     const text = typeof payload.text === 'string' ? payload.text : ''
     const files = Array.isArray(payload.attachments) ? payload.attachments : []
     if (text === '' && files.length === 0) return false
@@ -998,7 +1325,14 @@ export function install(wg) {
     // Who said it. The Hub's sender is a Hub user; the member list carries the same id on the
     // member record, so the name in the log is the one the group already shows.
     const senderId = event?.sender?.userId
-    const member = (room.members ?? []).find(other => other.hubUserId === senderId || other.id === senderId)
+    const senderEndpointId = event?.sender?.botEndpointId
+    // A BOT'S LINE. A Bot speaks through a device its owner signed in on, so the Hub records the
+    // person as the sender and the endpoint as `botEndpointId`. Attributing by user alone drew the
+    // colleague's butler Bot's answers under the colleague's own name — the group showed one
+    // participant where there were two, and calling the Bot by @ in that name reached nobody.
+    const member = senderEndpointId === undefined
+      ? (room.members ?? []).find(other => other.hubUserId === senderId || other.id === senderId)
+      : (room.members ?? []).find(other => other.endpointId === senderEndpointId)
     // A Hub endpoint may speak as itself; the payload's own name is the next best answer because the
     // sender published it. "A member" is the last resort, and it is a bug when it shows: the roster
     // sync (`applyRoster`) is what normally prevents it.
@@ -1027,7 +1361,7 @@ export function install(wg) {
         })),
       }),
     })
-    // A line from the Hub stays out of the group's own Session, and that is deliberate.
+    // A line from ANOTHER machine stays out of the group's own Session, and that is deliberate.
     //
     // `postToGroupSession` writes a `role: 'post'` workgroup message, which the relay hook consumes
     // to start a round — that is exactly right for a LOCAL member, whose words this machine's model
@@ -1035,6 +1369,20 @@ export function install(wg) {
     // second round here, which is the same conversation answered twice by two machines. The log is
     // the record; the round is what turns a message into work, and only the machine the message was
     // sent from should start one.
+    //
+    // BUT THIS MACHINE'S OWN LINE MUST START ONE — `mine`. A workgroup's composer sends through the
+    // Hub (`send-hub`), and the Hub does not echo an event back to the device that sent it, so the
+    // sender's line comes back through `apply` on its ack. Keeping it out of the group's Session, as
+    // the rule above says for foreign lines, therefore meant that a message typed into a workgroup
+    // started NO round at all: nothing was ever asked to answer — the state the user described as
+    // 「后加入的 Bot 还是不会回应和执行，历史 @ 也不行，原版群聊却可以」. The original local group works
+    // precisely because its composer prompts the group's own Session directly (`postToSession`), with
+    // no Hub in between; for a Hub group this is that same prompt, one ack later.
+    if (mine === true && senderEndpointId === undefined) {
+      // Attributed to the user and queued through the same door the local composer uses, so the
+      // round this starts is the one `openingSpeakers` already knows how to pick members for.
+      await wg.postToSession?.(room, text, files.length === 0 ? {} : { files })
+    }
     await wg.save()
     return true
   }
@@ -1303,7 +1651,12 @@ export function install(wg) {
   // A member's message in the round: in the log, for the members after it, and in the
   // round's replies, for the user. COPY OF THE ORIGINAL (`postInRound`).
   const postInRound = (room, round, member, text) => {
-    appendLine(room, { who: member.name, memberId: member.id, text })
+    const line = { who: member.name, memberId: member.id, text }
+    appendLine(room, line)
+    // A member's answer is the conversation, so it belongs on the Hub (see `mirrorLine`). Without
+    // this a group's Bot replies lived on one machine only, and a colleague's copy of the group was
+    // silent.
+    mirrorLine(room, room.log.at(-1) ?? line)
     round.replies.push({ botId: member.id, name: member.name, text, time: Date.now() })
     void wg.save().catch(() => {})
   }
@@ -1329,6 +1682,16 @@ export function install(wg) {
     // `rt.live`; a workgroup member Session is never in that map (see `live` above), so it
     // is this domain's own record that answers.
     const busy = live.get(sessionId)?.turn !== undefined
+    // COPY OF THE ORIGINAL (`claimTrigger`, src/host/turns.js:232): the member's running turn
+    // remembers what started it. The original learns this from the `user/message` event of the
+    // delivered message; this domain cannot rely on that, because the record must also exist for
+    // a turn that ends after the round let go of it — the late-reply path reads `info.role` to
+    // decide how the turn's result is routed, and an absent `info` silently dropped it.
+    liveOf(sessionId).info = {
+      kind: WG_SOURCE_KIND, form: 'relay', role: 'room',
+      exchangeId, senderName: 'You', roomId: room.id,
+      ...(by === undefined ? {} : { askedBy: by }),
+    }
     const done = new Promise((resolve) => {
       let timer
       let grace
@@ -1388,7 +1751,16 @@ export function install(wg) {
   }
   wg.yieldRoomTurn = (sessionId) => { for (const waiter of waitersOf(sessionId)) waiter.approval() }
   // The team's own tools are quick; any other tool is the start of work.
-  const QUICK_TOOLS = new Set(TEAM_TOOLS)
+  //
+  // COPY OF THE ORIGINAL, INCLUDING WHAT GOES IN THE SET. `TEAM_TOOLS` lists the ORIGINAL's group
+  // tools — `group_relay`, `post_to_group`, `read_group_chat`, `read_own_chat` — and a workgroup
+  // registers none of them; it registers `WG_TOOLS`. Testing `TEAM_TOOLS` alone therefore
+  // classified every one of THIS domain's group tools as "the start of work": a member that opened
+  // the round with `workgroup_relay`, read the group with `read_workgroup_chat`, or handed work on
+  // with `workgroup_post` counted as still busy, so the round stopped waiting for its answer and
+  // posted whatever it had. A local group's same three calls are quick and the member keeps its
+  // slot. That difference is what the user described as 「工作群 bot 的工具使用没有原版全」.
+  const QUICK_TOOLS = new Set([...TEAM_TOOLS, ...Object.values(WG_TOOLS)])
   wg.workRoomTurn = (sessionId, tool) => {
     if (QUICK_TOOLS.has(tool)) return
     for (const waiter of waitersOf(sessionId)) waiter.work()
@@ -1850,8 +2222,11 @@ export function install(wg) {
       (round.passed ?? []).length > 0 ? `Stayed silent: ${round.passed.join(', ')}.` : '',
       (round.failed ?? []).length > 0 ? `Could not answer because their model call failed: ${replies.filter(reply => reply.kind === 'failed').map(reply => `${reply.name} (${failureLine({ code: reply.code, status: reply.status, message: reply.text })})`).join(', ')}.` : '',
     ].filter(Boolean).join(BS + BS)
-    // Replies the poster waited for go on with the work it posted for.
-    const work = post.sub === undefined ? undefined : rt.closeWork?.(post.sub, `Workgroup "${room.name}"`, text)
+    // Replies the poster waited for go on with the work it posted for. The ledger is this
+    // domain's own (`host/handoffs.js`): reading `rt.closeWork` here matched nothing, because
+    // the original's map holds only the original domain's work — a workgroup post's `sub`
+    // was never in it, so this closed nothing even once `post.sub` arrived.
+    const work = post.sub === undefined ? undefined : wg.closeWork?.(post.sub, `Workgroup "${room.name}"`, text)
     if (post.botId === undefined) return
     try {
       const sessionId = rt.chatOf(post.botId)
@@ -1906,6 +2281,11 @@ export function install(wg) {
         // COPY OF THE ORIGINAL (`groups.js:509-517`): image readings go into the log only,
         // because members read the group as text; `@` names are still picked from what the
         // user typed. A file stays with its line and reaches each member it is shown to.
+        //
+        // A post that already carries a log seq was written when it was posted (a member's post
+        // into a running round, or a late result that had no round to join), and the original
+        // skips exactly these with the same field.
+        if (post.logged !== undefined) continue
         const readings = post.images === undefined || rt.imagesForGroup === undefined
           ? []
           : await rt.imagesForGroup(post.images, room.id)
@@ -1987,6 +2367,71 @@ export function install(wg) {
       }
       exec.concludeTurn?.()
       return JSON.stringify({ replies: round.replies, passed: round.passed, ...(round.failed.length > 0 ? { failed: round.failed } : {}) })
+    },
+  }))
+
+  // COPY OF THE ORIGINAL (`post_to_group`, src/host/tools.js:566). A member writes into the
+  // group as itself, choosing who answers with "@Name", and optionally asks for the replies
+  // to come back to it (`report_back`).
+  //
+  // This tool is what makes a hand-off possible at all in a workgroup. `report_back` is the
+  // only thing that opens a work for a group post (`openWork(sub, …)`), and `reportRound`
+  // closes it when the round ends so the poster goes on with what came back. Without a
+  // workgroup counterpart the original's `post_to_group` answered "No group chat called …
+  // that you can see" for a workgroup — it only knows local rooms — so a workgroup member
+  // could hand work ON but never hear it back.
+  //
+  // The name is this domain's own (`workgroup_post`), for the same reason the relay is
+  // (`P0-2`): a second registration of `post_to_group` would collide with the original's.
+  ctx.tools.register(defineTool({
+    name: WG_TOOLS.post,
+    description: 'Post a message into a Workgroup as yourself. A member\'s post calls only the members it names with "@Name"; without one it is only written into the group. With report_back the replies also come back to you as a new message when the round ends, so you can go on with the work.',
+    parameters: {
+      group: { type: 'string', required: true, description: 'Exact workgroup name' },
+      message: { type: 'string', required: true, description: 'What to say; write "@Name" to choose who answers, and a name without "@" to only mention a member' },
+      report_back: { type: 'boolean', description: 'Also send the members\' replies back to you as a new message when the round ends' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+    async execute(args, exec) {
+      await wg.load()
+      const owner = wg.sessionOwners.get(exec.agent?.id)
+      if (owner === undefined) return 'Only members of a Workgroup can post in it.'
+      const room = wg.workgroupOf(owner.workgroupId)
+      if (room === undefined) return 'Unknown workgroup'
+      if (args.group !== undefined && args.group !== room.name) return `You are in "${room.name}", not "${args.group}".`
+      const member = (room.members ?? []).find(other => other.id === owner.botId)
+      if (member === undefined) return `You are no longer in "${room.name}".`
+      // A member posting while it holds the group's speaking slot should answer there.
+      const info = wg.live.get(exec.agent?.id)?.info
+      if (info?.role === 'room' && info.roomId === room.id) return `You are speaking in "${room.name}" right now. Write your message as your reply instead.`
+      const text = String(args.message ?? '').trim()
+      if (text === '') return 'Write a message to post.'
+      const everyone = room.members ?? []
+      const named = mentionsIn(text, everyone).found.filter(other => other.id !== member.id && other.kind !== 'user')
+      const reportBack = args.report_back === true
+      // COPY OF THE ORIGINAL: an ordinary member's post calls only the members it names, so
+      // asking to be reported to with nobody named would wait for nobody.
+      const leads = room.adminId !== undefined && room.adminId !== null && room.adminId === member.id
+      if (!leads && reportBack && named.length === 0) {
+        return 'Nobody would answer: your post only calls the members you name. Write "@Name" for each member who should answer, or post without report_back.'
+      }
+      // Replies the poster waits for, while it works on what a Bot asked it for, are work
+      // handed on for that request (`handoffs.js`).
+      const work = reportBack ? worksOf(exec).find(id => wg.ownsWork(owner.botId, id)) : undefined
+      const sub = work === undefined ? undefined : randomUUID()
+      if (sub !== undefined) wg.openWork(sub, { from: owner.botId, room: room.id, parent: work })
+      try {
+        await wg.postToGroupSession(room, member, text, { member: true, ...(reportBack ? { reportBack: true } : {}), ...(sub ? { sub } : {}) })
+      } catch (failure) {
+        if (sub !== undefined) wg.dropWork(sub)
+        return `Could not post in "${room.name}": ${failure.message}`
+      }
+      const asker = sub === undefined ? undefined : wg.workAsker(work)?.senderSessionId
+      const askerName = asker === undefined ? undefined : wg.workgroupBotOf?.(asker)?.name ?? rt.botOf(asker)?.name
+      const waits = askerName ? ` End your turn when you have handed on everything: the replies bring you back to this work, and your answer goes to ${askerName} once all of it is back.` : ''
+      return named.length === 0
+        ? `Posted in "${room.name}", where the user and its members read it. Nobody answers it: your post only calls the members you name with @Name.`
+        : `Posted in "${room.name}". Members reply there, where the user reads them${reportBack ? '; their replies also come back to you as a new message when the round ends' : ', and nothing comes back to you'}.${waits}`
     },
   }))
 
@@ -2105,6 +2550,12 @@ export function install(wg) {
     }
     if (event.type === 'user/message') {
       const source = event.data?.source
+      // COPY OF THE ORIGINAL (`turns.js:232`, `claimTrigger`): a member Session's running turn
+      // remembers WHAT started it. `turn/end` reads it to decide how the turn's result is
+      // routed — a `role: 'room'` turn belongs to a round, a `role: 'request'` turn is work
+      // another Bot asked for, and `askedBy` is the member a round slot was called by. Without
+      // it this map held no `info` at all, so the late-reply path had nothing to route on.
+      if (owner.botId !== undefined && source?.kind === WG_SOURCE_KIND) liveOf(sessionId).info = source
       if (!isGroupSession(owner)) return
       // Only the GROUP's own Session queues; a member's Session is a Bot's own turn and
       // must never be read as a user post to the group.
@@ -2119,6 +2570,42 @@ export function install(wg) {
       }
       // COPY OF THE ORIGINAL (`turns.js:446`): the kickoff is a cue, never a line.
       else if (source?.kind === WG_SOURCE_KIND && source.role === 'kickoff') queue({ text: '', kickoff: true })
+      // COPY OF THE ORIGINAL (`turns.js:429-457`): a member's post into the group becomes the
+      // round's opener, and it carries MORE than the text — who posted it, whether the poster
+      // asked to be reported back to, the work the replies belong to (`sub`), and how the post
+      // came about (`late`, `progress`, `quiet`, `askedBy`, `done`).
+      //
+      // This branch was missing, and that is what broke a workgroup's hand-offs. A member's post
+      // still reached the round (the relay hook treats `role: 'post'` as an opener), but it
+      // reached it as a bare user message: `botId` was gone, so the post was attributed to the
+      // user; `reportBack` was gone, so `reportRound` never ran and the poster never heard back;
+      // `sub` was gone, so `post.sub` read `undefined` every time and no work was ever closed.
+      // A Bot that handed work on was never brought back to it — the group went quiet after the
+      // first answer.
+      else if (source?.kind === WG_SOURCE_KIND && source.role === 'post') {
+        // A long post comes as a file (attachLong), which stays with its line.
+        const content = Array.isArray(event.data?.content) ? event.data.content : []
+        const files = content.filter(block => block?.type === 'file' && block.attachment !== undefined).map(block => block.attachment)
+        queue({
+          text: textOf(event.data?.content).replace(/^\[Workgroup post from (?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, ''),
+          ...(files.length > 0 ? { files } : {}),
+          botId: source.senderSessionId,
+          name: source.senderName,
+          reportBack: source.reportBack === true,
+          ...(source.member ? { member: true } : {}),
+          ...(source.sub ? { sub: source.sub } : {}),
+          ...(source.late ? { late: true } : {}),
+          ...(source.progress ? { progress: true } : {}),
+          ...(source.quiet ? { quiet: true } : {}),
+          ...(source.failed ? { failed: source.failed } : {}),
+          ...(source.resumed ? { resumed: true } : {}),
+          ...(source.again ? { again: true } : {}),
+          ...(source.stopped ? { stopped: true } : {}),
+          ...(source.done ? { done: true } : {}),
+          ...(source.askedBy ? { askedBy: source.askedBy } : {}),
+          ...(source.logged !== undefined ? { logged: source.logged } : {}),
+        })
+      }
       return
     }
     // A member's turn: keep its waiter alive, and let the round go on when it is working.
@@ -2200,18 +2687,41 @@ export function install(wg) {
         turnText.delete(sessionId)
         turnShown.delete(sessionId)
         const waiters = [...wg.roomWaiters.entries()].filter(([, waiter]) => waiter.sessionId === sessionId)
-        if (waiters.length === 0) return
         const reason = event.data?.reason
         // COPY OF THE ORIGINAL: a failed model call is not a pass. The round shows why the
         // member is silent and goes on, instead of recording that it chose to stay quiet.
         const error = reason?.kind === 'error' ? reason.error : undefined
         const failure = error === undefined ? undefined : { code: error?.code ?? 'UNKNOWN', ...(error?.status ? { status: error.status } : {}), message: String(error?.message ?? error).slice(0, 300) }
         const reply = reason?.kind === 'aborted' ? null : texts.slice(shown).join(BS + BS).trim()
-        for (const [exchangeId, waiter] of waiters) {
-          wg.roomWaiters.delete(exchangeId)
-          if (failure !== undefined) waiter.fail(failure)
-          else waiter.resolve(reply)
+        if (waiters.length > 0) {
+          for (const [exchangeId, waiter] of waiters) {
+            wg.roomWaiters.delete(exchangeId)
+            if (failure !== undefined) waiter.fail(failure)
+            else waiter.resolve(reply)
+          }
+          return
         }
+        // COPY OF THE ORIGINAL (`turns.js:600-620`): the round moved on without this member —
+        // it went on working, went quiet, or waited for an approval — and its turn is ending
+        // now. What it ends with still reaches the group, and `lateRoomReply` is what tells the
+        // member that asked for it, so the chain of work closes.
+        //
+        // Returning early here (what this did) meant a member that outlived its slot was
+        // silent forever: the round had already let go of it, so no waiter existed and nothing
+        // was posted. That is one of the two ways a workgroup conversation stopped dead.
+        const info = wg.live.get(sessionId)?.info
+        // The trigger is read and then dropped, exactly as the original does at `turn/end`
+        // (`turns.js:527`): a later turn must not inherit this one's role.
+        if (wg.live.get(sessionId) !== undefined) {
+          wg.live.get(sessionId).info = undefined
+          if (wg.live.get(sessionId).since === undefined) wg.live.delete(sessionId)
+        }
+        if (info?.role !== 'room' || reason?.kind === 'aborted') return
+        const said = texts.slice(shown).join(BS + BS).trim()
+        const held = wg.takeRoomSteps?.(sessionId) ?? ''
+        const groupReply = wg.withRoomSteps?.(held, said) ?? said
+        if (failure !== undefined) void wg.lateRoomFailure?.(sessionId, info, failure)
+        else void wg.lateRoomReply?.(sessionId, info, groupReply, { shown: shown > 0 })
         return
       }
       default:
