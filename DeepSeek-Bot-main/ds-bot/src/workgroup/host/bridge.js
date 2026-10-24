@@ -239,6 +239,12 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       void Promise.resolve(wg.onTaskEvent?.({ workgroupId, event }))
         .catch(error => logger?.warn?.('ds-bot: task event %s not applied: %s', event.eventId, error?.message ?? error))
     }
+    // A memory event is a signal to re-read the Hub, never a payload to merge. The cache is a
+    // projection for prompt freezing; the Hub stays authoritative.
+    if (typeof event.type === 'string' && event.type.startsWith('memory.')) {
+      void Promise.resolve(wg.onMemoryEvent?.({ workgroupId, event }))
+        .catch(error => logger?.warn?.('ds-bot: memory event %s not applied: %s', event.eventId, error?.message ?? error))
+    }
     emit('event', { workgroupId, event })
     // Told to the Hub so a reconnect does not replay what is already on screen. Best effort: a
     // failed ack only costs one redundant replay, which the dedup above absorbs.
