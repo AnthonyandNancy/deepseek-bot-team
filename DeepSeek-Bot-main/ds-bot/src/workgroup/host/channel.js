@@ -525,7 +525,37 @@ export function install(wg) {
           const room = wg.roomOfHubGroup?.(workgroupId)
           const remote = await wg.hub.workgroup(workgroupId).catch(error => ({ error: error?.message ?? String(error) }))
           if (remote?.error !== undefined) return fail(remote.error, 'hub/unreachable')
-          return ok({ workgroupId, roomId: room?.id ?? null, members: remote.members ?? [] })
+          return ok({
+            workgroupId,
+            roomId: room?.id ?? null,
+            members: remote.members ?? [],
+            // WHICH BOT TRAVELS WITH THIS PERSON. A workgroup's roster lists Bots as endpoints, so
+            // 「这是我的哪一个 Bot」 had no answer anywhere in the app: the butler is `mainBotIds[0]`,
+            // the Bot a team is created with and the one every other Bot reports to. Answering here
+            // saves the settings page from guessing, and it is the same Bot `joinWithPrimaryBot`
+            // adds when this person joins a group.
+            butler: wg.bridge?.butler?.() ?? null,
+          })
+        }
+
+        // PUT THIS ACCOUNT'S BOTS BACK INTO THE GROUP, on demand.
+        //
+        // The same repair the bridge runs on every connect (`ensureOwnBotIsIn`), exposed as a call so
+        // a person whose group is in the broken state can fix it without waiting for a reconnect —
+        // and so the state is visible at all. It cannot remove anybody and it cannot add anybody
+        // else's Bot, which is what makes it safe to offer.
+        case 'resync-members': {
+          const workgroupId = String(body.workgroupId ?? '')
+          if (workgroupId === '') throw invalid('No workgroup named')
+          if (wg.roomOfHubGroup?.(workgroupId) === undefined) return fail('Unknown workgroup', 'bot/not-found')
+          if (wg.bridge?.status?.().connected !== true) {
+            return fail('The Hub is not connected, so the member list cannot be refreshed.', 'hub/unreachable')
+          }
+          const added = await wg.bridge.ensureOwnBotIsIn(workgroupId)
+            .catch(error => ({ error: error?.message ?? String(error) }))
+          if (added?.error !== undefined) return fail(added.error, 'hub/unreachable')
+          await wg.syncRoster?.({ hubWorkgroupId: workgroupId }).catch(() => {})
+          return ok({ added: Array.isArray(added) ? added : [], butler: wg.bridge?.butler?.() ?? null })
         }
 
         case 'group-invites': {

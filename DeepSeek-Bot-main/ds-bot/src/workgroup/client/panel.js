@@ -18,6 +18,7 @@ import { callWorkgroup } from './api.js'
 import { ApprovalCards } from './tasks.js'
 import { createSource } from '../../client/sources.js'
 import { RoomAvatar } from '../../client/mark.js'
+import { Elapsed, Shimmer, workPhrase } from '../../client/cells.js'
 import { t } from '../../client/i18n.js'
 import { mentionSpans } from '../../shared/mentions.js'
 import { WG_CSS } from './styles.js'
@@ -370,6 +371,58 @@ function AttachmentLink({ attachment, name }) {
     note === null ? null : h('span', { className: 'bt-wg-note', role: 'status' }, note))
 }
 
+// WHO IS WORKING IN THIS GROUP, above the composer — the original group chat's work indicator.
+//
+// A local group shows a member at work twice: the activity row (a `BotMark` plus a shimmering
+// `workPhrase` and an `Elapsed` clock) while it runs, and the bottom capsule listing everyone busy.
+// A workgroup's panel showed NEITHER. The host side has been complete all along — `roomWorkView`
+// and `activityView` answer in the original's exact shape — but the panel simply never asked, and
+// its chat is a transcript with no live part at all. That is the whole difference the user
+// described as 「工作群并没有原版群聊那种工作中的动效」.
+//
+// The data comes from the domain's own `state` route, the same one `refreshWorkgroups` uses, so this
+// adds no second mechanism: `work.rooms[roomId]` is keyed by the room id the panel already holds.
+//
+// Polled while a room is open, at the same cadence the connection line uses. A workgroup's members
+// run in OTHER Sessions on this machine (and on another machine entirely), so there is no client
+// event to subscribe to; the original's own work view is polled the same way.
+export function LocalWorking({ roomId }) {
+  const [busy, setBusy] = useState([])
+  useEffect(() => {
+    let live = true
+    let timer
+    let running = false
+    const poll = async () => {
+      if (running) return
+      running = true
+      try {
+        const value = await callWorkgroup('state')
+        // `work.rooms` is keyed by room id; a room with nobody working has no entry at all.
+        if (live) setBusy(value?.work?.rooms?.[roomId] ?? [])
+      } catch {
+        if (live) setBusy([])
+      } finally {
+        running = false
+        // The indicator has to disappear promptly when the work ends, so poll faster while somebody
+        // is busy than when nobody is — the same trade the connection line makes.
+        if (live) timer = setTimeout(poll, busy.length > 0 ? 700 : 2000)
+      }
+    }
+    void poll()
+    return () => { live = false; clearTimeout(timer) }
+    // `busy.length` is deliberately not a dependency: it is read inside the loop for the cadence, and
+    // depending on it would restart the poll on every change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId])
+  if (busy.length === 0) return null
+  return h('div', { className: 'bt-wg-working', role: 'status', 'aria-live': 'polite', 'data-working': String(busy.length) },
+    busy.slice(0, 3).map(entry => h('span', { key: entry.botId, className: 'bt-wg-working-line', 'data-speaking': entry.speaking === true ? 'true' : undefined },
+      h(RoomAvatar, { room: { members: [entry.botId] }, size: 18 }),
+      h(Shimmer, null, `...${workPhrase(entry)}`),
+      h(Elapsed, { at: entry.since, className: 'bt-wg-working-time' }))),
+    busy.length > 3 ? h('span', { className: 'bt-wg-working-more' }, `+${busy.length - 3}`) : null)
+}
+
 // The members of a Hub group, as the Hub reports them, plus the invite control. A person is shown
 // as a masked phone number (the Hub never returns a full one to a member), and a Bot endpoint as
 // the name its owner published.
@@ -515,6 +568,9 @@ function ChatPane({ roomId, roster }) {
       : null,
     h(MemberList, { hub: room.hub ?? null, members, onInvite: () => void openWorkgroup(roomId) }),
     h('div', { className: 'bt-wg-log' }, lines),
+    // The live part of the conversation: who is working right now, between the transcript and the
+    // box the user types in. Placed exactly where a local group's activity row sits.
+    h(LocalWorking, { roomId }),
     h(Composer, {
       roomId,
       hub: room.hub ?? null,

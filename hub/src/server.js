@@ -139,6 +139,14 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
       })),
     }
   })
+  // A group's own settings: the name and the notice, which are the two the Hub stores and every
+  // machine copies. POST rather than PATCH, like every other write here.
+  router.post('/v1/workgroups/:id/settings', async ({ params, body, headers }) => {
+    const session = caller(headers)
+    return workgroups.updateSettings({
+      userId: session.user_id, deviceId: session.device_id, workgroupId: params.id, body,
+    })
+  })
   router.post('/v1/workgroups/:id/members', async ({ params, body, headers }) => {
     const session = caller(headers)
     return created(await workgroups.addEndpointMember({

@@ -137,6 +137,85 @@
 
 > 第 7 项是这一轮真正的根因。前六项修的是「成员怎么进群」，第 7 项是「进群之后谁被叫到」——后者缺了，前者全都不起作用。
 
+## 跨用户对话、工具集、成员自愈、设置回写与工作动效（2026-10-25）
+
+用户问六条。前五条是核对，第六条是新缺陷。核对结论写在下面的表里——**凡是「已复制」的都以原版同名函数为对照逐项比对**，不以「看起来能跑」为准。
+
+### 1. 跨用户工作群的远程对话方式
+
+链路（两端都在 `src/workgroup/host/`，`src/host/` 零改动）：
+
+```
+A 机：用户打字 → send-hub → 本机 round（relay）
+      ├─ 本地 Bot           → sessionFor → 本机 Session 跑回合
+      └─ 他机 Bot（remoteBot）→ deliverRemote → Hub chat.message{call:{endpointId,note,fromName}}
+B 机：Hub event → bridge.apply → receiveRemote → payload.call 存在 → receiveCall
+      ├─ endpointId 对自己发布的 endpoint → 是 → runCall → sessionFor → 跑该 Bot 回合
+      └─ 不是自己的                       → 否 → 直接返回（同群多机只由属主机执行）
+B 机回答 → postInRound → mirrorLine → Hub → A 机 receiveRemote → 日志行
+```
+
+**本轮找到并修掉的根因**：`deliverRemote` 以前发的是纯文本「「某某」, you were called in this round」，而 `receiveRemote` 刻意**不**把 Hub 来的行写进群 Session（防另一台机器重复开回合）。两条规则各自都对，叠起来就是：**指令被当成发言丢掉，被叫的 Bot 从不开跑**。原版本地群没有这个问题，因为它的回合自己调用每个成员的 Session。
+
+修法是按**归属**拆开，而不是加特例：发言是「别人说的话」，本机无法再生成，所以只进日志；`call` 不是任何人的发言，它是**这台机器自己的回合**，所以由 `receiveCall` 变成 turn。`runCall` 不进 Hub 的调用路径（`void` 跑），否则一次模型回合会把群游标阻塞住。
+
+### 2. 工作群 Bot 的相互对话与工具使用：是否全部复制
+
+逐项对照原版（`src/host/groups.js` / `tools.js`）：
+
+| 能力 | 原版 | 工作群 | 结论 |
+|---|---|---|---|
+| 回合循环、`@Name` 扩展、每成员回合上限 | `runRound` | `runRound` | 已复制 |
+| 成员逐个发言、等待、超时、`[PASS]` | `roomTurn` | `roomTurn` | 已复制 |
+| 工作中发言（step）、迟到结果、审批挂起 | `postStep`/`lateRoomReply` | 同名 | 已复制 |
+| 交接（`report_back`、`sub`、工作闭环） | `handoffs.js` | `handoffs.js` | 已复制 |
+| 群工具集 | `group_relay`/`read_group_chat`/`read_own_chat`/`post_to_group` | `workgroup_relay`/`read_workgroup_chat`/`workgroup_read_own_chat`/`workgroup_post` | 4/4 已复制（改名避免冲突） |
+| 成员自身的全部工具（`message_bot`、`create_bot`、文件、搜索、能力…） | 共享同一运行时 | 同一运行时，无裁剪 | 已复制 |
+| 群里 @ 人、被叫后接话 | `mentionsIn`/`callMembers` | 同名 | 已复制 |
+| **工具是否算「开始干活」** | `QUICK_TOOLS = TEAM_TOOLS` | **原来也只有 `TEAM_TOOLS`** | **本轮修** |
+
+最后一行是本轮第二个真缺陷。`TEAM_TOOLS` 列的是**原版**的群工具名，工作群一个都没注册（它注册 `WG_TOOLS`）。用 `TEAM_TOOLS` 判定「这个工具很快、不算开始干活」时，工作群自己的 4 个群工具全被判成「开始干活」，于是成员一调 `workgroup_relay` / `read_workgroup_chat` / `workgroup_post`，回合就认为它在忙、不再等它的回答。原版里同样三个调用是「快的」，成员保持自己的发言位。这就是用户说的「工作群 bot 的工具使用没有原版全」——不是工具少了，是**判定把它们当成了另一类**。修法：`QUICK_TOOLS = new Set([...TEAM_TOOLS, ...Object.values(WG_TOOLS)])`。
+
+### 3. 同步群成员 + 管家 Bot 串联
+
+新增三件事：
+
+- **`ensureOwnBotIsIn(workgroupId)`**：连上 Hub 时对每个群执行；若该群**一个本账号的 Bot 都没有**，把自己的管家（`mainBotIds[0]`）加回去。这道闸门是刻意的——只在「一个都没有」时动手，所以**不会撤销有意的移除**（人主动移掉管家时，通常群里还有他的别的 Bot；即便没有，那也是他要的结果）。
+- **`resync-members`**：同一修复的手动入口，让已经处在坏状态的群不必等重连。
+- **`butler()` / `group-members` 回 `butler`**：直接回答「这是我的哪一个 Bot」。
+
+为什么必须有自愈：`joinWithPrimaryBot` 只在 `answerInvite` 一条路径上跑。用户真实库里 `wg_6fd8512b…` 的邀请已是 `accepted`、同事的 `bot_endpoints` 是 **0 行**——那条路径永远不会再跑，名册也永远不会出现一个从没被加进去的 Bot。**这个群不会自己好**。
+
+### 4. 群设置是否全量同步
+
+**不是全量，本轮修了能修的那一半。** Hub 只存 `name` 和 `notice` 两个设置，其余（回复模式、管理员、工作目录、权限预设）Hub 没有列，`CREATE_FIELDS` 也按名字拒绝——它们**设计上就是本地的**。
+
+原来的问题比「不同步」更糟：`name`/`notice` 是**单向**的。`ensureLinkedGroup` 每次把 Hub 的值抄到本地，却没人往 Hub 写；本机改名后，下一次名册读取把旧名按回去。这就是「设置改了又变回去」。修法：新增 `POST /v1/workgroups/:id/settings`（closed allow-list 只有 `name`/`notice`，owner/admin 才可改，`config_version` +1），`updateWorkgroup` 在改名/改公告后回写，Hub 拒绝则**报错而不是静默**。
+
+### 5. 「工作群更像微信那种群聊」
+
+这一条是判断，不是缺陷，但对齐了方向：微信式群聊 = 成员进出可见、发言人带身份、@ 有反馈、历史共享、谁在看得到、静默的人不打扰。按这个标准看当前实现：进出与身份已具备（本轮第 3 项），`@` 有反馈（本轮第 1 项），历史共享已具备（上一轮的 `mirrorLine`），在线态在名册里（`online` 字段，UI 未画——见已知缺口 18）。**还差的两点**：群内「正在输入/正在干活」的可见性（第 6 项），以及「真人可以选择不回」——现在 `openingSpeakers` 已确保真人永不被当成要回答的成员，这与微信一致。
+
+### 6. 缺少原版那种「工作中的动效」
+
+`src/workgroup/client/panel.js` 的聊天区只有静态日志行，**没有任何活的部件**。宿主侧其实一直是齐的：`roomWorkView` / `activityView` / `workView` 都返回原版一模一样的结构，原版的 state 路由也已经把它们并进来了（`src/host/channel.js:85`）。缺的只是工作群面板**从来没去要**。
+
+修法：新增 `LocalWorking`，轮询本域自己的 `state` 路由（`work.rooms[roomId]`），用**原版的** `Shimmer` / `Elapsed` / `workPhrase` 渲染，位置与原版一致（日志与输入框之间）。有人干活时 700ms 一轮、没人时 2s；当前发言人用 `data-speaking` 加深；`prefers-reduced-motion` 下关闭入场动画。
+
+### 证据
+
+- `ds-bot/test/workgroup-membership.test.js` 13 条（新增 6 条），全走 `apiHandle` + 真 `workgroup_relay` + 真 `session/event` + 真 Hub 进程：
+  - 跨用户调用往返（第 8 条）：Bob 的机器真的跑起被叫 Bot 的回合，回答经 Hub 回到 Alice 的日志；
+  - 管家自愈（第 9 条）、幂等不叠加（第 10 条）、`butler` 身份（第 11 条）；
+  - 改名/公告回写且不复活（第 12 条）、Hub 拒绝非设置字段与越权（第 13 条）。
+- `ds-bot/test/workgroup-working.test.js` 3 条：面板真的挂载了指示器、位置正确、用了原版原语与样式、模块能加载。
+- 变异验证：停用 `receiveCall` → 跨用户用例 10.7s 内红；`present.length >= 0` → 自愈用例红；`if (false)` 关掉设置回写 → 改名用例红；删掉 `h(LocalWorking…)` → 动效用例红。
+- `ds-bot` 1089 tests / 1088 pass / 1 skip / 0 fail；`npm run lint` 0 error / 13 warning；`build-client.mjs --check` 通过；`git status --porcelain ds-bot/src/host/` **为空**。
+
+### 一处需要知道的现场状况
+
+`hub/hub/.data/hub.db-shm` 在 `git status` 里有改动，但那是 SQLite 的共享内存文件，用户自己的桌面端（Electron）正开着并持有它，`git checkout` 无法覆盖（`Device or resource busy`）。**我没有强行动它**，也没有跑任何会写这个库的东西。`hub.db` 与 `hub.db-wal` 的改动是仓库里原本就有的（staged），不是本轮产生的。
+
 ## 已知缺口
 
 | # | 缺口 | 为什么现在不做 | 谁决定 | 何时回看 |
@@ -159,6 +238,9 @@
 | 16 | **人员没有显示名**：Hub `users` 表无 `display_name`，成员行显示打码手机号 | 加列属账号模型变更，且要处理两台机器一致 | 待定 | 需要「显示真实姓名」时 |
 | 17 | ~~已读游标客户端未写~~ | — | — | **已闭环（第 5 轮）** |
 | 18 | ~~成员在线状态未做~~ | — | — | **已闭环（第 5 轮）** |
+| 22 | **回复模式/管理员/工作目录/权限预设不同步到其他机器** | Hub 没有这些列，`CREATE_FIELDS` 按名字拒绝；属设计上的本地设置，不是遗漏 | 已定（见上「设置全量同步」） | 若要让两台机器一致，需先加 Hub 列 |
+| 23 | 群内「谁正在看」未画（Hub 名册有 `online`，UI 未用） | 微信式群聊会显示，但需要一条成员级订阅而非每次拉名册 | 待定 | 第 5 项跟进时 |
+| 24 | 动效只在「本机在跑」时可见；别的机器上的成员干活，本机看不到 | `roomWorkView` 是**本进程**的 `live` 表，跨机活动态要新的事件类型（`presence.working`） | 待定 | 第 6 项跟进时 |
 
 ## 第 4 轮自查修复（2026-10-22）
 

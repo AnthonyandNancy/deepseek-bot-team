@@ -50,6 +50,18 @@ export const WG_CSS = `
 .bt-wg-chat-name{font-size:15px;line-height:20px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bt-wg-chat-sub{font-size:12px;color:var(--bt-ink-3,rgba(20,20,20,.36));white-space:nowrap}
 .bt-wg-log{flex:1 1 auto;min-height:0;overflow-y:auto;padding:14px 20px;display:flex;flex-direction:column;gap:10px}
+/* The work indicator: the original activity row's look (a mark, a shimmering phrase, an elapsed
+   clock), stacked so several members at work fit above the composer. Spring in, fade out, and the
+   shimmer comes from the original .bt-shimmer, so this file adds no second animation language. */
+.bt-wg-working{flex:none;display:flex;flex-direction:column;gap:6px;padding:2px 20px 8px;min-width:0}
+.bt-wg-working-line{display:flex;align-items:center;gap:8px;min-width:0;transform-origin:0 50%;animation:bt-wg-working-in 220ms cubic-bezier(.23,1,.32,1) backwards}
+.bt-wg-working-line>.bt-shimmer{flex:1 1 auto;min-width:0;font-size:13px;line-height:20px;color:var(--bt-ink-2,rgba(20,20,20,.6));overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bt-wg-working-time{flex:none;font-size:11px;line-height:20px;color:var(--bt-ink-3,rgba(20,20,20,.36));font-variant-numeric:tabular-nums;white-space:nowrap}
+.bt-wg-working-more{flex:none;font-size:11px;line-height:16px;color:var(--bt-ink-3,rgba(20,20,20,.36));padding-inline-start:26px}
+/* The round's current speaker is the one the reader is waiting on, so it reads one step darker. */
+.bt-wg-working-line[data-speaking="true"]>.bt-shimmer{color:var(--bt-ink,#141414);font-weight:500}
+@keyframes bt-wg-working-in{from{opacity:0;transform:scale(.94)}}
+@media (prefers-reduced-motion:reduce){.bt-wg-working-line{animation:none}}
 .bt-wg-line{font-size:14px;line-height:21px;color:var(--bt-ink,#141414);overflow-wrap:anywhere}
 .bt-wg-line-who{font-weight:600;color:var(--bt-ink-2,rgba(20,20,20,.6))}
 .bt-wg-at{color:var(--bt-accent,#4d6bfe);font-weight:500;border-radius:4px}
