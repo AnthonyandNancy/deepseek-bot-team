@@ -32,3 +32,22 @@ test('a workgroup member Session is eligible for a memory review, and the relay 
   // Bot Session is for the original turn machinery.
   assert.equal(rt.isBotSession(memberSession.id), false)
 })
+
+test('deleting a workgroup archives its local memory and removes the Hub entries', async (t) => {
+  const { wg, rt, stop } = startRoundFixture()
+  t.after(stop)
+  const room = await wg.createWorkgroup({ name: 'DeleteProbe', members: twoMembers(), adminId: 'bot-a' })
+
+  const archived = []
+  const original = rt.archiveGroupMemory
+  rt.archiveGroupMemory = (value) => {
+    archived.push(value)
+    return Promise.resolve()
+  }
+  t.after(() => { rt.archiveGroupMemory = original })
+
+  await wg.deleteWorkgroup(room.id)
+  assert.equal(archived.length, 1, 'deleteWorkgroup must archive group memory exactly once')
+  assert.equal(archived[0].id, room.id, 'it archives the record being deleted, before the record is dropped')
+  assert.equal(wg.workgroupOf(room.id), undefined, 'and the local record is still removed')
+})

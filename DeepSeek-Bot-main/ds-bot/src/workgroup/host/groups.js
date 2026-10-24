@@ -1250,6 +1250,12 @@ export function install(wg) {
         throw new Error(error?.message ?? String(error))
       })
     }
+    // A deleted group's knowledge must not survive as a local folder that a later room with the
+    // same id could read. The original `deleteRoom` archives group memory for exactly this reason
+    // (`src/host/roster.js:484`); this copy was missing that call. It runs before the member
+    // Sessions leave the record, because the archive reads their snapshots.
+    await Promise.resolve(rt.archiveGroupMemory?.(room))
+      .catch(error => rt.warn('ds-bot: memory of workgroup %s not archived: %s', room.name, error?.message ?? error))
     // A member's Session is released with the group, and archived the way the
     // original does it, so no turn goes on working for a group that is gone.
     for (const sessionId of Object.values(room.sessions ?? {})) {
