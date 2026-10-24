@@ -15,6 +15,14 @@ Collaborators of this repository push branches here and open pull requests into 
 3. **No real secrets anywhere.** Do not commit API keys, tokens, cookies, `DSH_HOME` folders, logs or screenshots with personal data. The tests and the test bench use a scripted mock model and need no key.
 4. **Only original material.** Do not copy code, text, icons, logos or other graphics from other products or websites. Code under a license compatible with Apache 2.0 is the only exception: say where it comes from and add its notice to a `NOTICE` file.
 5. **Every change is tested.** Run the unit tests and the client check for every change (see [Test a change](#test-a-change)).
+6. **The workgroup copies the original group chat.** The workgroup under
+   `ds-bot/src/workgroup/` is a copy of the original group chat, changed only where a workgroup
+   genuinely differs (several accounts, a Hub, remote members). Before adding anything, check what
+   the original already does: reuse it, or change the copy. A second implementation of something the
+   original already has — a second memory store, a second settings UI, a second message path — is a
+   defect. If the original truly lacks the capability, say so in the pull request and record it in
+   `docs/workgroup/diff-manifest.md`. Sharing what a group already has across accounts is the
+   workgroup's whole job, not a reason to rebuild it.
 
 ## How we work
 

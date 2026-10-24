@@ -79,6 +79,30 @@ done
 | `src/host/parts.js`、`src/host/approvals.js`、`src/host/memory.js` | 上下文分段、审批、私人记忆未动 |
 | `src/shared/mentions.js`、`src/host/text.js` | 共享解析器原样复用 |
 
+## 3.1 “原版没有 → 新写”登记
+
+任何工作群代码，若声称“原版没有这个能力，所以要新写”，必须先在本表登记，再写代码。
+没有登记的新写模块，评审直接拒绝。
+
+| 新写模块 | 原版最接近的实现 | 为什么不能复用或改复制件 | 判定 |
+|---|---|---|---|
+| `src/workgroup/host/hub.js` | 无（原版没有 Hub） | 跨用户传输在原版不存在，属真正的本域新增 | ✅ 合理 |
+| `src/workgroup/host/bridge.js` | 无（原版没有 socket 同步） | 同上 | ✅ 合理 |
+| `src/workgroup/host/memory-sync.js` | `src/host/memory.js` 的全套群记忆 | **不新写记忆引擎**：只把原版写入转成事件、把远端事件喂回原版写入路径 | ✅ 传输层新增，引擎复用 |
+| `hub/src/memories/service.js` | `src/host/memory.js` 的条目/容量/权限语义 | 原版是单机 Markdown 文件，没有跨账号共享、成员 ACL、版本 compare-and-apply 与 Hub 审计；存储后端与传输必须新写。条目类型、容量、凭据拒收与回顾入口沿用原版口径，不另造记忆产品模型 | ✅ 存储后端新增，业务语义复用 |
+| `hub/src/db/migrations.js` v8 | 无（原版没有 Hub 数据库） | `group_memories` / `group_memory_events` / FTS 是 Hub 权威存储的结构要求，原版文件系统无法表达跨机 ACL 与级联删除 | ✅ 存储后端新增 |
+| `src/workgroup/host/memories.js` | `src/host/memory.js` 的 `queue/loadScope` 与 `memory-view` | 原版引擎只读写本机文件，无法把远端条目变成可冻结提示词投影；本模块只做 Hub 读取后的投影与事件触发重读，不实现第二套记忆语义 | ✅ 投影/传输新增 |
+| `src/workgroup/client/group-settings.js` 的 `MemoryCard` | `src/client/memory-panel.js` + 原版群详情 `MemoryRow` | 原版面板没有 Hub 调用，也没有 ACL 条目列表/修正/删除的跨机路径；卡片只调用既有 `apiHandle`，展示与操作复用原版记忆面板的形态与文案口径 | ✅ UI 适配新增，不新写记忆语义 |
+| `src/workgroup/host/ownership.js` 的 `rt.memoryRoomOf` | `src/host/memory.js:1476` 的 `agent/status` 过滤与 `roomIdOf` | 原版只认 `isBotSession`，工作群成员 Session 不在原版索引；新增只读接缝，不改变 `isBotSession` 或原版记忆行为 | ✅ 只读接缝 |
+
+判定口径：
+
+1. “原版没有”必须给出文件与函数级证据（哪个文件、哪个函数、为什么覆盖不了这个场景）。
+2. “不能复用”必须说明复用会破坏什么（例如原版引擎是单进程文件写，跨机需要传输层）。
+3. 传输、存储后端、协议适配可以是新写；**业务语义（谁能读写、条目长什么样、容量、回顾规则）不得新写**。
+
+---
+
 ## 4. 测试文件
 
 `test/` 下新增 9 个工作群测试与 `client-render.mjs`；20 个既有测试改为按 `options.path === '/api/bot'` 捕获路由，`usage`/`secrets`/`feed` 按监听器标记选取，`install`/`agents` 把工作群自有工具与注册调用纳入断言。这些是夹具适配，不改变产品行为。

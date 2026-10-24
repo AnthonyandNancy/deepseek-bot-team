@@ -429,3 +429,33 @@ Hub 仍是唯一有序源；`src/host/` 仍是零改动。
 
 > 1 skip 是既有 Windows 临时目录用例，与 G6 无关。人工项保持 BLOCKED。
 
+---
+
+## G6R 群记忆跨机传输（2026-10-24）
+
+- 状态：**未开工**。本节在实施完成后才填写自动化证据；现在只登记口径，不写 PASS。
+- 现行计划：`docs/superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md`
+- 设计：`g6r/DESIGN-COPY-FIRST.md`
+- 被否决的旧方案：`feat/g6-group-memory` 分支与 `docs/superpowers/plans/2026-10-26-g6-group-memory.md`
+
+### 为什么重做
+
+旧 G6 把“原版群记忆没有跨机传输”误判成“原版没有群记忆”，新建了 `group_memories` 表、
+`memory-*` 端点和独立 `MemoryCard`。原版 `memory.js` 本身已有群作用域、成员校验、容量、回顾、
+面板与归档；工作群缺的只是跨机传输。详见 `parity-audit.md` §1 与 `g6r/DESIGN-COPY-FIRST.md` §2。
+
+### G6R 门禁（待实施）
+
+| # | 门禁 | 判定方式 | 当前结论 |
+|---|---|---|---|
+| G6R-1 | 原版记忆引擎零行为变化 | `memory.test.js` 既有断言未改且全绿 | **未开工** |
+| G6R-2 | 工作群成员 Session 能读群记忆段并被回顾 | `workgroup-memory-room.test.js` | **未开工** |
+| G6R-3 | 群写入上报、私聊/团队/本地群不上报 | `workgroup-memory-sync.test.js` | **未开工** |
+| G6R-4 | 远端变更走原版写入路径且幂等 | `workgroup-memory-sync.test.js` | **未开工** |
+| G6R-5 | `memory.change` 扇出且不计未读 | `hub/test/ws-events.test.js` | **未开工** |
+| G6R-6 | ack 不把记忆变更加工成聊天行 | `ds-bot/test/workgroup-bridge.test.js` | **未开工** |
+| G6R-7 | 删除工作群归档原版记忆 | `workgroup-memory-sync.test.js` | **未开工** |
+| G6R-8 | 两机真实传播、离群失效 | `test-realtime/workgroup-memory-sync.test.js` | **未开工** |
+| G6-M1 | 两台真机、两个账号 | 只能人工 | **BLOCKED** |
+
+> 本节不得在实施前填写“通过”。G6-M1 与 G4/G5 人工项一样，只有维护者能写 PASS。

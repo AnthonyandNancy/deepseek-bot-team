@@ -1,3 +1,9 @@
+> **⚠️ 已被 G6R 取代（2026-10-24）。** 本方案把“原版群记忆没有跨机传输”误判为“原版没有群记忆”，
+> 据此刻意新建了 `group_memories` 表、`memory-*` 端点和独立记忆 UI，违反“工作群是原版群聊复制件、
+> 先在复制件上改”的规则。保留本文仅作历史记录与反例，**不得据此实施**。现行方案见
+> [`docs/superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md`](../../superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md)
+> 与 [`docs/workgroup/g6r/NEXT-INSTRUCTION.md`](../../workgroup/g6r/NEXT-INSTRUCTION.md)。
+
 # G6 续接指令（BotCode · 自足版）
 
 - 用法：新建会话后，把下面「指令正文」整段作为第一条消息发出。
