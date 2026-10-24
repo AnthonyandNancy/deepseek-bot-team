@@ -639,6 +639,9 @@ export function apply(ctx) {
       if (workgroupOf(id) === undefined) return localWrites.updateRoom(id, patch)
       const body = { id }
       for (const key of ['name', 'notice', 'mode', 'workDir', 'permission']) if (patch?.[key] !== undefined) body[key] = patch[key]
+      // `mode` stays `mode` on the way to `api/workgroup`: the host applies it to the room AND pushes
+      // it to the Hub as `replyMode` (`updateWorkgroup`). Translating it here would give the route two
+      // names for one setting.
       if (patch?.admin !== undefined) body.adminId = patch.admin ?? null
       if (patch?.adminId !== undefined) body.adminId = patch.adminId
       if (Array.isArray(patch?.members)) body.members = patch.members

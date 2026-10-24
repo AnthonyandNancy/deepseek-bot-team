@@ -132,10 +132,15 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
     const online = wsService?.onlineUsers((group.members ?? []).map(member => member.userId)) ?? new Set()
     return {
       ...group,
+      // The caller's own role in the group, so a client can decide what to offer before it tries.
+      myRole: group.role ?? 'member',
       members: (group.members ?? []).map(member => ({
         ...member,
         // Only a person has a socket. A Bot endpoint is online when its owner's device is.
         ...(member.userId === undefined ? {} : { online: online.has(member.userId) }),
+        // WHOSE BOT THIS IS, answered where the answer is known. Read from the connection, not from
+        // the request: a member cannot claim somebody else's Bot is theirs by sending a flag.
+        ...(member.ownerUserId === undefined ? {} : { ownerIsYou: member.ownerUserId === session.user_id }),
       })),
     }
   })
@@ -207,10 +212,13 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
     const session = caller(headers)
     return endpoints.list({ userId: session.user_id, workgroupId: queryOf(req).get('workgroupId') ?? undefined })
   })
+  // A publish carries the Bot's appearance, and an appearance may be a photo the owner picked — a
+  // data URL capped at 200 000 characters by `cleanAvatar`. The default 64 KiB body cap is smaller
+  // than that, so this route raises it; nothing else about the route changes.
   router.post('/v1/bot-endpoints', async ({ body, headers }) => {
     const session = caller(headers)
     return created(await endpoints.publish({ userId: session.user_id, deviceId: session.device_id, body }))
-  })
+  }, { maxBodyBytes: 256 * 1024 })
   router.post('/v1/bot-endpoints/:id/revoke', async ({ params, headers }) => {
     const session = caller(headers)
     return endpoints.revoke({ userId: session.user_id, deviceId: session.device_id, endpointId: params.id })

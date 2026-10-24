@@ -484,7 +484,7 @@ export function install(wg) {
   //
   // `adminId` follows the Hub's owner, so a group renamed on one machine and an admin-only round on
   // another agree about who leads.
-  async function applyRoster({ hubWorkgroupId, members: hubMembers }) {
+  async function applyRoster({ hubWorkgroupId, members: hubMembers, replyMode, permission }) {
     if (hubWorkgroupId === undefined) return undefined
     await wg.load()
     const room = roomOfHubGroup(hubWorkgroupId)
@@ -530,6 +530,44 @@ export function install(wg) {
         // name without a second lookup.
         hubUserId: member.userId ?? undefined,
         ...(member.memberType === 'botEndpoint' ? { endpointId: member.endpointId } : {}),
+        // WHOSE BOT THIS IS, carried on the member record so every surface can say it.
+        //
+        // A workgroup's members come from several accounts, and two colleagues may each have a Bot
+        // called "Chief". Without the owner, the member list is a list of names with no way to tell
+        // whose is whose — which is exactly what the user asked for: 「需要在每个 bot 增加标识，
+        // 区分每个 bot 的归属」. `hubUserId` above is the PERSON member's account and is empty on a
+        // Bot row, so it cannot answer this.
+        //
+        // `mine` is the Hub's own answer (`ownerIsYou`, computed from the authenticated connection),
+        // not a local guess: this machine must not have to know the account ids of its own Bots to
+        // draw the tag, and a record written by an older build has no `ownerUserId` at all.
+        ...(member.memberType === 'botEndpoint'
+          ? {
+              ...(member.ownerUserId === undefined ? {} : { ownerUserId: member.ownerUserId }),
+              ...(member.ownerIsYou === true ? { mine: true } : {}),
+            }
+          : {}),
+        // THE APPEARANCE THE OWNER PUBLISHED.
+        //
+        // The original derives a Bot's look from its own id (`lookOf`, characters.js). This roster's
+        // ids are Hub ids (`ep_…`), so the same Bot was drawn from a different id on every machine —
+        // a different shape and a different colour. The Hub now returns the owner's snapshot, and
+        // this is where it becomes part of the member record every component already reads.
+        //
+        // Only a REMOTE Bot needs it: a member that resolved to one of this team's own Bots (`local`)
+        // is indexed by its real id, so `roster.byId` answers with the Bot record itself and its own
+        // `avatar` — the live one, which must win over a snapshot taken at publish time.
+        ...(!local && member.avatar !== undefined && typeof member.avatar === 'object'
+          ? {
+              // Split the way `lookOf()` READS it: the shape and the photo live on `avatar`, and the
+              // colour lives on the record itself (`colorOf`). Putting all three on `avatar` would
+              // leave the colour to be derived from the Hub id again — the same wrong colour, in a
+              // different place.
+              ...(typeof member.avatar.shape === 'string' ? { avatar: { shape: member.avatar.shape, ...(typeof member.avatar.image === 'string' ? { image: member.avatar.image } : {}) } }
+                : typeof member.avatar.image === 'string' ? { avatar: { image: member.avatar.image } } : {}),
+              ...(typeof member.avatar.color === 'string' ? { color: member.avatar.color } : {}),
+            }
+          : {}),
         role: member.role,
         membershipId: member.membershipId,
       }
@@ -573,6 +611,11 @@ export function install(wg) {
     // response as the name; a Bot added in this session looked identical to the already-recorded
     // roster under the old three-field test, so the early return kept a record with no
     // `membershipId` — and 「移除成员」 then had no id to send.
+    // EVERY FIELD THE ROSTER SUPPLIES, compared — including the ones added for the owner tag and the
+    // appearance. A field left out of this list is a field whose change the next roster read throws
+    // away: the record looks "the same" and the early return keeps the stale one, which is how a Bot
+    // wearing the wrong character would stay wrong forever.
+    const sameAppearance = (mine, theirs) => JSON.stringify(mine ?? null) === JSON.stringify(theirs ?? null)
     const same = (room.members ?? []).length === next.length
       && (room.members ?? []).every((member, index) => member.id === next[index]?.id
         && member.name === next[index]?.name
@@ -581,9 +624,53 @@ export function install(wg) {
         && member.endpointId === next[index]?.endpointId
         && member.membershipId === next[index]?.membershipId
         && member.role === next[index]?.role
-        && member.hubUserId === next[index]?.hubUserId)
+        && member.hubUserId === next[index]?.hubUserId
+        && member.ownerUserId === next[index]?.ownerUserId
+        && member.mine === next[index]?.mine
+        && sameAppearance(member.avatar, next[index]?.avatar)
+        && member.color === next[index]?.color)
       && room.adminId === adminId
-    if (same) return room
+    // WHO ANSWERS A PLAIN MESSAGE — the group's setting, not this machine's.
+    //
+    // The original keeps this on the room (`buildRoom`: `mode: 'admin'`), and its round reads it in
+    // `openingSpeakers`: `room.mode === 'admin'` asks the admin alone, `everyone` asks all of them.
+    // A workgroup's round IS that code, so the only thing missing was for the value to be the SAME
+    // on both machines — it lived only in this machine's state file, so the colleague's machine kept
+    // its own default and answered the same message with a different member.
+    //
+    // Read BEFORE the early return below, because a settings change arrives with an unchanged
+    // member list: the roster is identical, only `replyMode` moved. Returning early first would
+    // drop exactly the change this line exists for.
+    //
+    // Only applied when the Hub actually sent one: an older Hub, or a roster applied from a create
+    // response, leaves the local value alone instead of resetting it to a default.
+    const modeChanged = WG_ROOM_MODES.includes(replyMode) && room.mode !== replyMode
+    // THE GROUP'S SHARED PERMISSION PRESET, taken from the Hub the way the name and the notice are.
+    //
+    // `undefined` from the Hub means "the Hub has no opinion" (an older Hub, or a create response) —
+    // that leaves the local value alone. `null` means "each member uses its own again", which is the
+    // original's own representation (`src/host/permissions.js`: `delete room.permission`), so it must
+    // CLEAR the local field rather than be ignored.
+    //
+    // Read before the early return, like the reply mode and for the same reason: a permission change
+    // arrives with an unchanged member list.
+    let permissionChanged = false
+    if (permission !== undefined && (room.permission ?? null) !== permission) {
+      if (permission === null || permission === '') delete room.permission
+      else room.permission = String(permission)
+      permissionChanged = true
+      // Apply it to the member Sessions that already exist here, exactly as the original's
+      // `setRoomPermission` does: a member with no Session yet picks it up when its first turn makes
+      // one (`applyMemberSettings` reads `room.permission`).
+      await rt.setRoomPermission?.(room, room.permission ?? null)
+        ?.catch?.(error => rt.warn('ds-bot: permission for %s not applied: %s', room.name, error))
+    }
+    if (same && !modeChanged && !permissionChanged) return room
+    if (modeChanged) room.mode = replyMode
+    if (same) {
+      await wg.save()
+      return room
+    }
     const previous = room.members ?? []
     room.members = next
     room.adminId = adminId
@@ -630,7 +717,12 @@ export function install(wg) {
     if (hubWorkgroupId === undefined) return undefined
     const answer = await wg.hub?.workgroup?.(hubWorkgroupId).catch(() => undefined)
     if (answer === undefined || Array.isArray(answer.members) === false) return undefined
-    return applyRoster({ hubWorkgroupId, members: answer.members })
+    return applyRoster({
+      hubWorkgroupId,
+      members: answer.members,
+      replyMode: answer.replyMode,
+      permission: answer.permission,
+    })
   }
   wg.syncRoster = syncRoster
 
@@ -737,9 +829,11 @@ export function install(wg) {
     if (actorId !== undefined && room.adminId !== actorId) {
       throw new Error(`Only the user or the admin of "${room.name}" can change it`)
     }
-    // The name as it was before this call, so the Session title can be brought in line
-    // with the record afterwards (COPY OF the original, roster.js:445,459).
-    const before = room.name
+    // The settings as they were before this call, so the Session title can be brought in line with
+    // the record afterwards (COPY OF the original, roster.js:445,459) and so only what actually moved
+    // is pushed to the Hub. A snapshot rather than the name alone: the reply mode is pushed by the
+    // same path, and it needs the same "did it change" test.
+    const before = { name: room.name, mode: room.mode, permission: room.permission ?? null }
     if (patch.name !== undefined) {
       const clean = String(patch.name).trim().slice(0, 60)
       // A custom name must be unique (the original's cleanRoomName rule); an empty one
@@ -921,7 +1015,7 @@ export function install(wg) {
     // created with — the screen showed the "@" menu offering "You, Chief, 阿三大苏打"
     // for a group called 阿松大, because that was the Session's title, not the group's
     // name. The original keeps the two in step on every rename; so does this now.
-    if (room.name !== before) await retitleWorkgroup(room)
+    if (room.name !== before.name) await retitleWorkgroup(room)
     // THE HUB LEARNS THE NAME AND THE NOTICE, because they are the two settings it stores.
     //
     // A workgroup's title and notice live on the Hub (`workgroups.name` / `workgroups.notice`), and
@@ -930,15 +1024,30 @@ export function install(wg) {
     // record, the Hub kept the old value, and the next roster read (or the next start) put the old
     // one straight back. That is what 「设置改了又变回去」 is.
     //
-    // The other settings — reply mode, admin, folder, permission — are deliberately NOT sent: the Hub
-    // has no column for them and refuses a create body carrying anything outside `CREATE_FIELDS`, so
-    // they stay local by design rather than by omission.
-    if (room.hubWorkgroupId !== undefined && (room.name !== before || patch.notice !== undefined)) {
+    // WHICH SETTINGS TRAVEL. A workgroup is one group with several people in it, so a setting that
+    // decides what happens in the group has to be the same everywhere — otherwise the two machines
+    // take different decisions about the same message:
+    //   * `name` and `notice` — the title and the shared instruction;
+    //   * `mode` (reply mode) — who answers a plain message. This is the one the user reported
+    //     (「没有点名 @ 其他同事的 bot，跟原群聊一样由管理员接待」): a local-only value meant the
+    //     colleague's machine kept its own default and the admin never received the message there.
+    // The rest — admin, folder, permission — stay local: each machine runs its own Bots with its own
+    // folders and its own capability presets, and a shared folder would be a path the Hub must never
+    // learn (plan §13.2). `SETTINGS_FIELDS` on the Hub refuses anything else by name.
+    const modeChanged = patch.mode !== undefined && room.mode !== before.mode
+    // The group's permission preset is sent whenever the caller touched it, INCLUDING when it was
+    // switched off: `null` is the value that means "each member uses its own again", and skipping it
+    // would leave the old preset on the Hub for every other machine to keep applying.
+    const permissionTouched = patch.permission !== undefined
+    if (room.hubWorkgroupId !== undefined
+      && (room.name !== before.name || patch.notice !== undefined || modeChanged || permissionTouched)) {
       const pushed = await Promise.resolve()
         .then(() => wg.bridge.updateGroupSettings({
           workgroupId: room.hubWorkgroupId,
-          ...(room.name !== before ? { name: room.name } : {}),
+          ...(room.name !== before.name ? { name: room.name } : {}),
           ...(patch.notice !== undefined ? { notice: room.notice ?? '' } : {}),
+          ...(modeChanged ? { replyMode: room.mode } : {}),
+          ...(permissionTouched ? { permission: room.permission ?? null } : {}),
         }))
         .then(() => undefined)
         .catch(error => error)
@@ -1160,8 +1269,14 @@ export function install(wg) {
     // group's Session (the relay path) but not the log the chat draws from, so the group looked
     // as if the member never finished. A local group never had this problem: `postToRoom`
     // always wrote the log line for a post.
+    // A LINE THAT CROSSED THE HUB IS ALREADY IN THE LOG.
+    //
+    // `receiveRemote` appended it before calling here, so entering the round bookkeeping below would
+    // append it a second time (and mirror it back to the Hub, around the loop). `remote` is that
+    // fact, and it short-circuits every local-write step while keeping the Session write.
+    const fromHub = extra.remote === true
     let logged
-    const running = [...wg.roomProgress.values()].find(round => round.roomId === room.id)
+    const running = fromHub ? undefined : [...wg.roomProgress.values()].find(round => round.roomId === room.id)
     // A result that came back after the round let go of its member (`extra.late`) has no round
     // to join, and in a workgroup nothing else is guaranteed to run afterwards: the relay only
     // fires when the user or a member posts. The original leaves such a line to the next relay;
@@ -1197,7 +1312,9 @@ export function install(wg) {
     if (agent === undefined) return
     const message = createUserMessage({
       content: [{ type: 'text', text: `[Workgroup post from ${member.name}]\n${text}` }],
-      source: { kind: WG_SOURCE_KIND, form: 'relay', role: 'post', exchangeId: randomUUID(), senderName: member.name, senderSessionId: member.id, roomId: room.id, ...extra, ...(logged !== undefined ? { logged } : {}) },
+      // `role` comes from the caller when it says so: a line that crossed the Hub is `remote`, which
+      // the relay hook must not read as a cue (see `receiveRemote`). Everything else is a `post`.
+      source: { kind: WG_SOURCE_KIND, form: 'relay', ...extra, role: extra.role ?? 'post', exchangeId: randomUUID(), senderName: member.name, senderSessionId: member.id, roomId: room.id, ...(logged !== undefined || fromHub ? { logged: true } : {}) },
     })
     if (typeof agent.followup === 'function') agent.followup(message)
     else await ctx.sessionController.prompt({ sessionId: room.id, mode: 'queue', content: message.content, source: message.source })
@@ -1382,6 +1499,30 @@ export function install(wg) {
       // Attributed to the user and queued through the same door the local composer uses, so the
       // round this starts is the one `openingSpeakers` already knows how to pick members for.
       await wg.postToSession?.(room, text, files.length === 0 ? {} : { files })
+    } else if (senderEndpointId !== undefined || member?.kind === 'remoteBot') {
+      // SOMEBODY ELSE'S BOT SAID THIS, AND THIS MACHINE'S CHAT HAS TO SHOW IT.
+      //
+      // The rule above ("a foreign line never enters the group Session") is what stops a second
+      // round, and it was ALSO what kept the colleague's Bot out of this machine's conversation:
+      // the line reached the log the panel draws, but the group's own Session — which is the chat
+      // surface the user actually reads — never saw it. The result is the reported 「邀请同事加入
+      // 后，消息并没有实时更新」: the message was on the Hub, on this machine's disk, and not on
+      // the screen.
+      //
+      // So a Bot's line is written into the group's Session with `role: 'remote'`, which `cells.js`
+      // draws exactly like a `post` and which the relay hook (`relayStream`) deliberately does NOT
+      // treat as an opener. It is history here, not a cue: the round it belongs to already ran, on
+      // the machine that produced it.
+      //
+      // A PERSON's line (`member.kind === 'user'`, no endpoint) is left out on purpose. A chat
+      // surface draws a person's own message from the `user/message` event, and writing a second
+      // copy here would show their sentence twice — once as them, once as a group member.
+      await postToGroupSession(room, { id: memberId, name }, text, {
+        remote: true,
+        form: 'remote',
+        role: 'remote',
+        ...(files.length === 0 ? {} : { files }),
+      }).catch(error => rt.warn('ds-bot: line from %s not shown in %s: %s', name, room.name, error?.message ?? error))
     }
     await wg.save()
     return true
@@ -2761,6 +2902,16 @@ export function install(wg) {
       // or tool step starts a relay.
       const opens = message => message.role === 'user'
         && (message.source?.kind === 'user' || message.source?.kind === 'schedule' || (message.source?.kind === WG_SOURCE_KIND && (message.source.role === 'post' || message.source.role === 'kickoff')))
+      // A LINE FROM ANOTHER MACHINE IS HISTORY, NEVER A CUE.
+      //
+      // It has to be in the group's Session or this machine's chat shows nothing of what the rest of
+      // the group said — that is the reported 「同事加入后，消息并没有实时更新」 when the colleague's
+      // Bot answers. But it must not open a round here: the round it belongs to ran on the machine
+      // that produced the line, and running a second one here is the same conversation answered
+      // twice by two machines.
+      //
+      // `receiveRemote` therefore writes it with `role: 'remote'`, which `cells.js` draws exactly
+      // like a `post` and this hook deliberately does not list as an opener.
       const latest = [...options.messages].reverse()
         .find(message => message.role === 'assistant' || message.role === 'tool' || opens(message))
       if (latest?.role !== 'user') {

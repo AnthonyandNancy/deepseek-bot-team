@@ -26,6 +26,10 @@
 // The bridge never signs anything: `hub.socketAuth()` returns a `sign` closure over the stored
 // private key, so this module cannot read the key even if it wanted to.
 import { randomUUID } from 'node:crypto'
+// The appearance function the whole app already draws Bots with. It is DOM-free (characters.js is
+// pure data and arithmetic), so the host may use it: publishing `lookOf(bot)` is what makes this
+// Bot wear the same character on somebody else's machine.
+import { lookOf } from '../../client/characters.js'
 
 // The transport is the runtime's own `WebSocket`, not a package.
 //
@@ -756,8 +760,8 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       return wg.hub.leaveMember({ workgroupId, membershipId })
     },
     // A group's name and notice, changed for everyone (`groups.js` calls this after a rename).
-    async updateGroupSettings({ workgroupId, name, notice }) {
-      return wg.hub.updateGroupSettings({ workgroupId, name, notice })
+    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission }) {
+      return wg.hub.updateGroupSettings({ workgroupId, name, notice, replyMode, permission })
     },
     async answerInvite({ inviteId, accept }) {
       const answer = await wg.hub.answerInvite({ inviteId, accept })
@@ -766,15 +770,13 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       // authors.
       if (accept && answer.workgroupId !== undefined) {
         stateOf(answer.workgroupId)
-        // BEFORE THE FIRST ROSTER READ, and deliberately: a person joining alone is somebody the
-        // group has nobody to answer with. `joinWithPrimaryBot` puts this team's butler Bot in the
-        // group as an endpoint member, so the roster this machine reads next already contains it.
-        await bridge.joinWithPrimaryBot({ workgroupId: answer.workgroupId }).catch(error => {
-          // A join must not fail because the Bot could not be added: the person is in the group,
-          // which is the thing they asked for, and the Bot is retried on the next reconnect.
-          logger?.warn?.('ds-bot: this team\'s Bot was not added to %s: %s', answer.workgroupId, error?.message ?? error)
-          return undefined
-        })
+        // ACCEPTING AN INVITATION ADDS THE PERSON AND NOTHING ELSE.
+        //
+        // This also used to put the team's butler Bot in, so a colleague would not arrive with
+        // nobody to answer for them. That is a decision about WHICH of somebody's Bots joins a
+        // group, and the user has ruled it out: 「去掉强制要求携带管家 bot 入群的限制，每个 bot 的
+        // 权限由群设置」. The invitation is a person joining a group; their Bots are theirs to add,
+        // from the group's own member list, and what each may do there is a group setting.
         await ensureRoom(answer.workgroupId)
         await wg.syncRoster?.({ hubWorkgroupId: answer.workgroupId }).catch(() => {})
         await bridge.sync(answer.workgroupId)
@@ -827,33 +829,34 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       return added
     },
 
-    // THIS ACCOUNT'S BUTLER BOT BELONGS IN EVERY GROUP THE ACCOUNT IS IN, AND NOTHING USED TO PUT IT THERE.
+    // NOBODY IS ADDED TO A GROUP ON THE MEMBER'S BEHALF.
     //
-    // `joinWithPrimaryBot` runs on exactly one path: `answerInvite`, once, at the moment an invitation
-    // is accepted. Measured on the user's own Hub database, that is not enough — one real group
-    // (`wg_6fd8512b…`) has an accepted invitation and ZERO `bot_endpoints` rows for the colleague, so
-    // that machine is in the group with nothing that can answer, and nothing will ever fix it:
-    // the invitation is already `accepted`, so `answerInvite` will not run again, and the roster the
-    // other machine reads will never mention a Bot that was never added.
+    // This used to put the team's butler Bot into every group the account was in, whenever the group
+    // held none of that account's Bots. It was a repair for a real bug (an accepted invitation that
+    // added the person and no Bot, permanently), but as a standing rule it decides FOR the person
+    // which of their Bots joins a group — and the user has ruled that out: 「去掉强制要求携带管家
+    // bot 入群的限制，每个 bot 的权限由群设置」.
     //
-    // The repair is idempotent and it can only ever ADD this account's own butler, so running it on
-    // every connect is safe. It is deliberately NARROW: it acts only when the group has none of this
-    // account's Bots at all. That guard is what keeps it from undoing an intentional removal — a
-    // person who removes their butler from a group has usually left other Bots of theirs in it, and
-    // even when they have not, they asked for it on purpose, so 「移除成员」 stays removed.
+    // So the automatic path is gone, including the "self-heal" on every connect. What replaces it:
+    //   * joining a group adds nothing (see `answerInvite` below);
+    //   * a person adds whichever of their Bots they want, from the group's own member list — that
+    //     call already exists (`joinWithPrimaryBot` is still the endpoint-add helper it uses);
+    //   * what a Bot may do in the group is the group's own permission preset
+    //     (`workgroups.permission`, the original's `room.permission`), not a consequence of which
+    //     Bot happens to be there.
+    //
+    // Kept as a method because `channel.js` and the tests call it by name; it now reports what is
+    // there instead of changing it.
     async ensureOwnBotIsIn(workgroupId) {
       if (workgroupId === undefined) return []
       const roster = await wg.hub.workgroup(workgroupId).catch(() => undefined)
       const members = Array.isArray(roster?.members) ? roster.members : []
-      if (members.length === 0) return []
-      // Which of this account's published endpoints are already in the group.
-      await bridge.publishBotEndpoints().catch(() => [])
-      const mine = wg.bridge?.endpointBots?.() ?? wg.state?.endpointBots ?? {}
+      const mine = wg.state?.endpointBots ?? {}
       const present = members.filter(member => member.memberType === 'botEndpoint' && mine[member.endpointId] !== undefined)
-      if (present.length > 0) return []
-      // A group this account is in with none of its Bots: the state the real database is in. Adding
-      // the butler is the same call an accepted invitation makes.
-      return bridge.joinWithPrimaryBot({ workgroupId })
+      if (present.length === 0) {
+        logger?.warn?.("ds-bot: none of this account's Bots is in %s; add one from the group settings", workgroupId)
+      }
+      return []
     },
     async workgroups() {
       return wg.hub.workgroups()
@@ -912,6 +915,14 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
             // The minimal set: this Bot can chat, and it can receive files. Nothing here claims a
             // tool, a folder or a capability the plugin cannot honour.
             capabilities: ['chat', 'files'],
+            // ITS OWN FACE, so it looks the same on every machine.
+            //
+            // The original derives a look from the Bot's own id (`lookOf`, characters.js). Another
+            // machine never has that id — the roster gives it `ep_…` — so the same Bot was drawn as
+            // a different character in a different colour. Sending the three things `lookOf` reads
+            // (shape, colour, optional photo) is the smallest thing that makes the appearance
+            // identical everywhere; the Hub stores it as a snapshot and hands it back on the roster.
+            avatar: lookOf(bot),
           })
           const endpointId = result?.endpoint?.endpointId
           if (endpointId !== undefined) {

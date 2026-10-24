@@ -78,7 +78,12 @@ export const CREATE_FIELDS = new Set(['name', 'notice', 'avatar', 'upgradeId', '
 // `CREATE_FIELDS` is one: an unfamiliar field is a client bug worth naming now, not a value that
 // silently never travels. `avatar` and `upgradeId` are absent — the first is not exposed by any
 // client yet, and the second is the idempotency key of a create, not a setting.
-export const SETTINGS_FIELDS = new Set(['name', 'notice'])
+export const SETTINGS_FIELDS = new Set(['name', 'notice', 'replyMode', 'permission'])
+
+// Who answers a plain message in the group. The original has exactly these two
+// (`src/host/roster.js` `buildRoom`: `mode: 'admin'`), and a workgroup must not invent a third:
+// both machines run the same round code, so the value has to mean the same thing on each.
+export const REPLY_MODES = new Set(['admin', 'everyone'])
 
 export const MAX_NAME_LENGTH = 120
 export const MAX_NOTICE_LENGTH = 4000
@@ -96,7 +101,7 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
 
   const byId = stmt('SELECT * FROM workgroups WHERE id = ?')
   const byUpgrade = stmt('SELECT * FROM workgroups WHERE upgrade_id = ?')
-  const writeSettings = stmt('UPDATE workgroups SET name = ?, notice = ?, config_version = config_version + 1 WHERE id = ?')
+  const writeSettings = stmt('UPDATE workgroups SET name = ?, notice = ?, reply_mode = ?, permission = ?, config_version = config_version + 1 WHERE id = ?')
   const insertGroup = stmt(`INSERT INTO workgroups
     (id, owner_user_id, name, notice, avatar, config_version, last_seq, upgrade_id, created_at)
     VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)`)
@@ -120,7 +125,7 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
     WHERE workgroup_id = ? AND seq > ? AND type = ?`)
 
   const userById = stmt('SELECT * FROM users WHERE id = ?')
-  const endpointById = stmt('SELECT id, name FROM bot_endpoints WHERE id = ?')
+  const endpointById = stmt('SELECT id, name, owner_id, avatar FROM bot_endpoints WHERE id = ?')
   const userByPhone = stmt('SELECT * FROM users WHERE phone_e164 = ?')
 
   const insertInvite = stmt(`INSERT INTO invites (id, workgroup_id, invited_by, invitee_id, invited_phone_masked, status, created_at, expires_at)
@@ -146,6 +151,18 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
       memberType: row.member_type,
       userId: row.user_id ?? undefined,
       endpointId: row.endpoint_id ?? undefined,
+      // A BOT BELONGS TO SOMEBODY, AND THE GROUP NEEDS TO SAY WHO. `ownerUserId` is the account whose
+      // device runs this Bot; the member list draws it so two colleagues' butlers called "Chief" are
+      // not the same participant. `ownerIsYou` is answered on the Hub rather than guessed locally,
+      // because "whose Bot is this" is a fact about accounts, not about the machine reading it.
+      ...(endpoint === undefined ? {} : {
+        ownerUserId: endpoint.owner_id,
+        // The appearance its owner published, so every machine draws the same character and colour.
+        // Absent on an endpoint published by a build that did not send one.
+        ...(endpoint.avatar === null || endpoint.avatar === undefined
+          ? {}
+          : { avatar: JSON.parse(endpoint.avatar) }),
+      }),
       // `name` is whatever this member is best called by; `phoneMasked` stays separate so a client
       // never has to guess which one it received.
       name: endpoint === undefined ? undefined : endpoint.name,
@@ -161,6 +178,22 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
     ownerUserId: row.owner_user_id,
     name: row.name,
     notice: row.notice,
+    // `replyMode` is who answers a plain message: the admin alone (`admin`, the original's default)
+    // or everybody in turn (`everyone`). It is a GROUP setting, not a per-machine preference — two
+    // colleagues looking at the same group must agree about who was asked.
+    replyMode: row.reply_mode ?? 'admin',
+    // THE ONE PERMISSION PRESET THE WHOLE GROUP SHARES, copied from the original's `room.permission`.
+    // Absent means "each member uses its own", exactly as an absent `permission` on a local group does
+    // (`src/host/permissions.js` `applyPermission`: `room?.permission ?? bot.permission`).
+    //
+    // It travels because a workgroup is ONE group on several machines, and this value decides what
+    // every member is allowed to do in it. Held only locally, each machine ran the same group under a
+    // different set of permissions.
+    // ALWAYS PRESENT, including `null`. The key being absent has to mean ONE thing — "this Hub does
+    // not know the setting" (an older Hub) — and `null` has to mean "each member uses its own again",
+    // which is a real value the original stores by deleting the field. Sending `null` is the only way
+    // a client can tell "switched off here" from "your Hub never had this".
+    permission: row.permission ?? null,
     avatar: row.avatar ?? undefined,
     lastSeq: row.last_seq,
     upgradeId: row.upgrade_id ?? undefined,
@@ -497,11 +530,37 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
         next.name = name
       }
       if (body?.notice !== undefined) next.notice = body.notice === null ? '' : text(body.notice, 'The notice', MAX_NOTICE_LENGTH)
+      if (body?.permission !== undefined) {
+        // A preset NAME, or null for "each member uses its own". The NAME is validated against DSH's
+        // own catalog on the machine that sets it (`rt.cleanRoomPermission`); the Hub can only check
+        // the shape, because the catalog belongs to the Harness, not to the Hub.
+        if (body.permission !== null && (typeof body.permission !== 'string' || body.permission.trim() === '' || body.permission.length > 64)) {
+          throw badRequest('workgroup/invalid-field',
+            'permission must be a preset name, or null to let each member use its own.')
+        }
+        next.permission = body.permission === null ? null : body.permission.trim()
+      }
+      if (body?.replyMode !== undefined) {
+        const mode = String(body.replyMode)
+        if (!REPLY_MODES.has(mode)) {
+          throw badRequest('workgroup/invalid-field',
+            `"${mode}" is not a reply mode. Allowed: ${[...REPLY_MODES].join(', ')}.`)
+        }
+        next.replyMode = mode
+      }
       if (Object.keys(next).length === 0) return { workgroupId, changed: false, workgroup: publicGroup(group) }
 
       // `config_version` is bumped so a client holding a cached copy can tell it is stale. The
       // column has existed since the first migration and this is the first writer.
-      writeSettings.run(next.name ?? group.name, next.notice ?? group.notice, workgroupId)
+      writeSettings.run(
+        next.name ?? group.name,
+        next.notice ?? group.notice,
+        next.replyMode ?? group.reply_mode ?? 'admin',
+        // `null` is a MEANING here, not a missing value: "each member uses its own again". The
+        // original writes it the same way (`delete room.permission` when the toggle is switched off).
+        next.permission === undefined ? (group.permission ?? null) : next.permission,
+        workgroupId,
+      )
       audit.record({ actorId: userId, deviceId, action: 'workgroup.settings', targetId: workgroupId, result: Object.keys(next).join(',') })
       membershipChanged({ workgroupId, kind: 'settings' })
       return { workgroupId, changed: true, workgroup: publicGroup(byId.get(workgroupId)) }

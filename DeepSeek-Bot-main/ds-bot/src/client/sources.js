@@ -54,7 +54,19 @@ export function indexRoster(value, workgroups) {
   // that, whose members still carry the Hub's `ep_…` id.
   for (const member of workgroupMembers(workgroups)) {
     const own = member.botId === undefined ? undefined : byId[member.botId]
-    if (byId[member.id] === undefined) byId[member.id] = own ?? member
+    if (byId[member.id] === undefined) {
+      // A REMOTE BOT KEEPS ITS OWN FACE.
+      //
+      // `lookOf()` derives a character and a colour from the id it is given, so a member indexed by
+      // its Hub id (`ep_…`) was drawn as a DIFFERENT Bot from the one the owner sees: different
+      // shape, different colour, on every machine. The appearance now travels with the roster
+      // (`applyRoster` copies the Hub's `avatar` snapshot onto the member), and this is where it
+      // reaches every component, because they all look a member up through `byId`.
+      //
+      // The Bot's own record still wins when this machine has one (`own`): that is the live avatar,
+      // which may have changed since the snapshot was published.
+      byId[member.id] = own ?? member
+    }
   }
   // The DSH Agent is not a Bot: it indexes by its own id and by each Session it owns.
   const agentsById = {}

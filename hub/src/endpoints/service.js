@@ -24,7 +24,7 @@ export const VISIBILITIES = new Set(['private', 'workgroup'])
 // The only keys a publish request may carry. Anything else — `workDir`, `cwd`, `sessionId`,
 // `path`, `config` — is refused with a message that says why, because the alternative is a
 // client author quietly believing it now publishes its folder.
-const ALLOWED_KEYS = new Set(['localBotId', 'name', 'visibility', 'capabilities'])
+const ALLOWED_KEYS = new Set(['localBotId', 'name', 'visibility', 'capabilities', 'avatar'])
 
 export const MAX_ENDPOINTS_PER_DEVICE = 50
 
@@ -32,12 +32,12 @@ export function createBotEndpointService({ db, audit, now = () => Date.now() }) 
   const stmt = prepared(db)
   const iso = () => new Date(now()).toISOString()
 
-  const insert = stmt(`INSERT INTO bot_endpoints (id, owner_id, device_id, local_bot_id, name, visibility, capabilities, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`)
+  const insert = stmt(`INSERT INTO bot_endpoints (id, owner_id, device_id, local_bot_id, name, visibility, capabilities, avatar, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`)
   const byId = stmt('SELECT * FROM bot_endpoints WHERE id = ?')
   const byLocal = stmt('SELECT * FROM bot_endpoints WHERE owner_id = ? AND device_id = ? AND local_bot_id = ?')
   const ofOwner = stmt('SELECT * FROM bot_endpoints WHERE owner_id = ? ORDER BY created_at ASC')
-  const restore = stmt("UPDATE bot_endpoints SET status = 'active', name = ?, visibility = ?, capabilities = ?, revoked_at = NULL WHERE id = ?")
+  const restore = stmt("UPDATE bot_endpoints SET status = 'active', name = ?, visibility = ?, capabilities = ?, avatar = ?, revoked_at = NULL WHERE id = ?")
   const revoke = stmt("UPDATE bot_endpoints SET status = 'revoked', revoked_at = ? WHERE id = ?")
   const countOnDevice = stmt('SELECT count(*) AS c FROM bot_endpoints WHERE device_id = ?')
 
@@ -49,9 +49,48 @@ export function createBotEndpointService({ db, audit, now = () => Date.now() }) 
     name: row.name,
     visibility: row.visibility,
     capabilities: JSON.parse(row.capabilities),
+    // The Bot's appearance, as its owner published it. Absent for an endpoint published before this
+    // column existed, and the reader then falls back to the pre-publish behaviour.
+    ...(row.avatar === null || row.avatar === undefined ? {} : { avatar: JSON.parse(row.avatar) }),
     status: row.status,
     createdAt: row.created_at,
   })
+
+  // The appearance an endpoint may publish: a registered shape NAME, a palette NAME, and — because
+  // the original lets a Bot carry a photo instead of a character — the data URL of that photo.
+  //
+  // Why it travels at all: the original derives a Bot's look from ITS OWN id (`lookOf()`,
+  // characters.js). A group's roster arrives with Hub ids (`ep_…`), so without this the same Bot was
+  // drawn in somebody else's machine from the wrong id — a different shape and a different colour,
+  // which is exactly 「每个 bot 的头像是不能变的，现在是变了」.
+  //
+  // Why a closed allow-list of THREE things: anything richer is a way to smuggle a local fact onto
+  // the Hub. `shape` and `color` are names the plugin validates against its own tables; `image` is
+  // bytes the Bot already holds inline, capped well under one HTTP body. Nothing here names a file,
+  // a path or a session.
+  const MAX_AVATAR_IMAGE_LENGTH = 200_000
+  const cleanAvatar = (raw) => {
+    if (raw === undefined || raw === null) return null
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw badRequest('endpoint/invalid-avatar', 'avatar must be an object with a shape, a color, or an image.')
+    }
+    const avatar = {}
+    for (const key of Object.keys(raw)) {
+      if (!['shape', 'color', 'image'].includes(key)) {
+        throw badRequest('endpoint/unsupported-field',
+          `"${key}" is not part of a Bot's appearance. Allowed: shape, color, image.`)
+      }
+    }
+    if (typeof raw.shape === 'string' && /^[a-z][\w-]{0,31}$/.test(raw.shape)) avatar.shape = raw.shape
+    if (typeof raw.color === 'string' && /^[a-z][\w-]{0,31}$/.test(raw.color)) avatar.color = raw.color
+    if (typeof raw.image === 'string' && raw.image.startsWith('data:image/')) {
+      if (raw.image.length > MAX_AVATAR_IMAGE_LENGTH) {
+        throw badRequest('endpoint/invalid-avatar', `The avatar image is ${raw.image.length} characters; the limit is ${MAX_AVATAR_IMAGE_LENGTH}. Use a smaller square image.`)
+      }
+      avatar.image = raw.image
+    }
+    return Object.keys(avatar).length === 0 ? null : avatar
+  }
 
   const cleanCapabilities = (raw) => {
     if (raw === undefined) return ['chat']
@@ -86,6 +125,10 @@ export function createBotEndpointService({ db, audit, now = () => Date.now() }) 
       const visibility = typeof body.visibility === 'string' ? body.visibility : 'workgroup'
       if (!VISIBILITIES.has(visibility)) throw badRequest('endpoint/invalid-visibility', 'visibility must be "private" or "workgroup".')
       const capabilities = cleanCapabilities(body.capabilities)
+      // A publisher that does not mention `avatar` keeps whatever the Hub already holds: an older
+      // client must not blank out the appearance a newer one published.
+      const avatar = body.avatar === undefined ? undefined : cleanAvatar(body.avatar)
+      const avatarJson = avatar === undefined ? undefined : (avatar === null ? null : JSON.stringify(avatar))
 
       const existing = byLocal.get(userId, deviceId, localBotId)
       if (existing !== undefined) {
@@ -93,10 +136,10 @@ export function createBotEndpointService({ db, audit, now = () => Date.now() }) 
           // A revoke is a decision, but publishing again is the same user asking for the same Bot
           // on the same device: refusing here would leave a Bot permanently unpublishable after
           // one misclick.
-          restore.run(name, visibility, JSON.stringify(capabilities), existing.id)
+          restore.run(name, visibility, JSON.stringify(capabilities), avatarJson ?? existing.avatar ?? null, existing.id)
         } else {
-          db.prepare('UPDATE bot_endpoints SET name = ?, visibility = ?, capabilities = ? WHERE id = ?')
-            .run(name, visibility, JSON.stringify(capabilities), existing.id)
+          db.prepare('UPDATE bot_endpoints SET name = ?, visibility = ?, capabilities = ?, avatar = ? WHERE id = ?')
+            .run(name, visibility, JSON.stringify(capabilities), avatarJson ?? existing.avatar ?? null, existing.id)
         }
         return { endpoint: publicEndpoint(byId.get(existing.id)), created: existing.status === 'revoked' }
       }
@@ -107,7 +150,7 @@ export function createBotEndpointService({ db, audit, now = () => Date.now() }) 
 
       const id = newId('ep')
       try {
-        insert.run(id, userId, deviceId, localBotId, name, visibility, JSON.stringify(capabilities), iso())
+        insert.run(id, userId, deviceId, localBotId, name, visibility, JSON.stringify(capabilities), avatarJson ?? null, iso())
       } catch (error) {
         if (isUniqueViolation(error)) {
           const raced = byLocal.get(userId, deviceId, localBotId)

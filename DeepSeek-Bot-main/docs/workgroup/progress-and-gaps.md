@@ -216,6 +216,117 @@ B 机回答 → postInRound → mirrorLine → Hub → A 机 receiveRemote → �
 
 `hub/hub/.data/hub.db-shm` 在 `git status` 里有改动，但那是 SQLite 的共享内存文件，用户自己的桌面端（Electron）正开着并持有它，`git checkout` 无法覆盖（`Device or resource busy`）。**我没有强行动它**，也没有跑任何会写这个库的东西。`hub.db` 与 `hub.db-wal` 的改动是仓库里原本就有的（staged），不是本轮产生的。
 
+## 六条新报告的定位与修复（2026-10-25 第二轮）
+
+用户报六条，问「确认是 G几 的任务」。结论：**全部落在 G4/G5 已交付范围内的缺陷，没有一条需要新阶段**；
+六条都已修在 `src/workgroup/` 与 `hub/` 内，`src/host/` 零改动（`git status --porcelain ds-bot/src/host/` 为空）。
+
+| # | 用户所述 | 归属 | 为什么是缺陷而不是新需求 |
+|---|---|---|---|
+| 1 | 邀请同事后消息没有实时更新 | **G4**（门禁 2 的另一半） | 消息确实到了本机磁盘，但 `openWorkgroup` 只读一次房间，此后没有任何东西再读 |
+| 2 | 每个 Bot 要有归属标识 | **G4**（成员模型） | 成员行只有 `endpointId`，没有 owner，两台机器都画不出「谁家的」 |
+| 3 | Bot 头像不能变 | **G4**（成员模型） | `lookOf()` 按 id 派生形象，名册给的是 `ep_…`，于是同一个 Bot 换个机器换个脸 |
+| 4 | 不 @ 就由管理员接待 | **G4**（群设置） | `openingSpeakers` 早就是原版复制件，缺的是 `mode` 从没离开过设置它的那台机器 |
+| 5 | 去掉强制带管家入群 | **G4**（成员模型） | 是我上一轮**加**的自动修复，用户不要这个行为 |
+| 6 | 群设置要实时同步 | **G4**（群设置） | `name`/`notice` 上一轮已回写；`replyMode` 仍只在本地，且改了不刷新界面 |
+
+### 逐条根因与修法
+
+**1. 消息不实时更新（两个独立原因，都在显示侧）**
+
+- 面板读一次就再也不读：`openWorkgroup` 调 `callWorkgroup('room')` 后就没人再读，Hub 的新行写进了
+  `state.json`，屏幕上没有。修法：新增 `useLiveRoom(roomId)`，在 `ChatPane` 挂载期间每 1.2 s 重读一次，
+  **只在 `roomSignature` 真的变了才写 store**（否则每 tick 重建一次 transcript），离开群即停。
+- 别家 Bot 的发言从不进群 Session：`receiveRemote` 有一条正确规则「Hub 来的行不写群 Session」，因为它
+  会触发第二次回合。但这条规则同时把同事 Bot 的话挡在了用户阅读的那个聊天面之外。修法：按**角色**拆开而不
+  是按来源——这条行以 `role: 'remote'` 写进群 Session，`cells.js` 照常画它，`relayStream` 的 `opens`
+  判定里没有 `remote`，所以它只是历史，不是回合的引子。
+
+**2. Bot 归属标识**
+
+Hub 的 `publicMember` 补 `ownerUserId` / `botRole`，群详情再补 `ownerIsYou`（**在 Hub 侧按认证连接算**，
+客户端不能自称）。本地成员记录补 `ownerUserId` / `mine` / `botRole`，成员列表画「你的 / 同事的」。
+
+**3. 头像会变**
+
+`bot_endpoints` 加 `avatar` 列，发布时带上 `lookOf(bot)` 的结果（形状名 + 调色板名 + 可选照片 data URL），
+名册把它还原到成员记录上。**必须按 `lookOf()` 读取的方式拆开**：形状和照片在 `avatar`，颜色在记录本身的
+`color`——三项全塞进 `avatar` 会让颜色继续按 `ep_…` 派生，等于换个地方犯同一个错。本机自己的 Bot 仍然用
+`roster.byId` 里的活记录，快照不会覆盖它。
+
+**4. 管理员接待（不 @ 时）**
+
+Hub `workgroups` 加 `reply_mode`（默认 `'admin'`，与原版 `buildRoom` 一致），`SETTINGS_FIELDS` 从
+`{name, notice}` 扩到 `{name, notice, replyMode}`。`updateWorkgroup` 在 `mode` 真的变了时回写；`applyRoster`
+读回并写进 `room.mode`——**在 `same` 提前返回之前读**，否则「只有设置变了、成员没变」这一种情况恰好被
+提前返回吃掉。回合本身不用改：`openingSpeakers` 一直是原版的复制件。
+
+**5. 去掉强制管家入群**
+
+删掉两处自动添加：`answerInvite` 接受邀请后不再 `joinWithPrimaryBot`；连接时的 `ensureOwnBotIsIn` 不再
+补人（方法保留，因为 `channel.js` 与测试按名字调用它，现在只报告不再修改）。加 Bot 的能力没有消失，只是
+**决定权回到人**：`joinWithPrimaryBot` 仍是添加端点用的那一个，从群成员列表调用。
+
+至于「每个 bot 的权限由群设置」，**我第一版做错了**：给 `memberships` 加了一个 `bot_role`
+（`lead` / `member`），那是原版没有的概念，而且它没有写入方，恒为 `'member'`。用户指出方向：
+「原版群聊是如何做的，那么工作群和工作群跨用户 bot 也是这么做，只是工作群需要远程同步」。核对原版
+`src/host/permissions.js` 后确认原版是**两层的、没有「每个 Bot 的角色」**：
+
+```
+bot.permission     Bot 自己的预设
+room.permission    整个群共用一个预设，覆盖每个成员的
+缺席               各成员用自己的（applyPermission：room?.permission ?? bot.permission）
+```
+
+工作群早就复制了这一整套（`updateWorkgroup` 调 `rt.setRoomPermission`，`sessionFor` 调
+`rt.applyPermission(…, { permission: room.permission })`，设置页有「Same for every member」那张卡）。
+缺的只有**远程同步**。所以改为：`workgroups.permission`（原版字段的远程副本，NULL = 各用各的），
+并用迁移 v6 **删掉** `bot_role`。
+
+**6. 群设置实时同步**
+
+`replyMode` 现在与 `name`/`notice` 走同一条回写路径（`POST /v1/workgroups/:id/settings`），Hub 广播
+`member.changed`，各机器 `syncRoster` 时连同 `replyMode` 一起读回。界面侧的新读靠第 1 条的 `useLiveRoom`。
+
+### 证据
+
+Hub 迁移 **v5**（三条 `ALTER TABLE ... ADD COLUMN`，全部带默认值，G5 Hub 原地升级）：
+
+```
+-- v5（做成员归属、头像、谁先答）
+ALTER TABLE workgroups   ADD COLUMN reply_mode TEXT NOT NULL DEFAULT 'admin'
+ALTER TABLE bot_endpoints ADD COLUMN avatar TEXT
+ALTER TABLE memberships  ADD COLUMN bot_role TEXT NOT NULL DEFAULT 'member'   ← 自造，v6 删除
+
+-- v6（Bot 权限改用原版模型，并清掉 v5 的自造字段）
+ALTER TABLE workgroups   ADD COLUMN permission TEXT                            -- 原版 room.permission
+ALTER TABLE memberships  DROP COLUMN bot_role
+```
+
+- `hub`：262 tests / 262 pass / 0 fail。三条锁定列清单的旧断言更新为新契约
+  （`db-g5-schema`、`bot-endpoints`、`upgrade-no-history`），因为它们钉的是「第 4 版是最后一版」。
+- `ds-bot`：1092 tests / 1091 pass / 1 skip / 0 fail；`lint` 0 error / 13 warning；`build-client.mjs --check` 通过。
+- `test/workgroup-membership.test.js` 14 项，其中新增/改写 5 项，全部走 `apiHandle` + 真 Hub 进程：
+  - 「接受邀请只加人，Bot 由人自己加」——`resync-members` 现在返回 `added: []`；
+  - 「每个 Bot 名册里带归属，只有主人被告知 `yours`」（同时断言本地成员记录的 `mine`）；
+  - 「远端的 Bot 保留主人发布的头像」——用主人本机加载后的记录算期望值，不是 fixture 字面量；
+  - 「回复模式在一台机器改了，另一台读回同一个值」，并断言未知值被拒；
+  - 旧的「Hub 拒绝 `mode`」改为「Hub 拒绝 `permission`」，因为 `replyMode` 已经不是被拒字段。
+- `test/workgroup-working.test.js` 新增 1 项：`useLiveRoom` **被挂载**（匹配调用行，不是同名函数定义）、
+  只重读 `room`、靠 `roomSignature` 决定是否写 store、且只写仍在屏上的那个群。
+- 变异验证（改完立刻还原）：
+  - `modeChanged = false` → 回复模式用例红；
+  - 删掉 `useLiveRoom(roomId)` 调用 → 实时用例红（**第一次变异没红**，因为断言匹配到了
+    `export function useLiveRoom(`；改成 `^\s+useLiveRoom\(roomId\)$` 多行匹配后才真正守住）；
+  - 丢掉头像快照 → 头像用例红；
+  - 丢掉 `mine: true` → 归属用例红（**第一次也没红**，因为当时只断言了 Hub 的 `ownerIsYou`；
+    补上本地成员记录的断言后才守住）。
+
+### 这一轮学到的（已落成断言）
+
+**断言必须钉住「接通」而不是「存在」。** 两处变异第一次都没红，都是因为断言匹配到的是注释、定义或
+Hub 字段，而不是产品路径上真正生效的那一行。和 G5 补修轮的教训同一条：结构存在不等于接上了。
+
 ## 已知缺口
 
 | # | 缺口 | 为什么现在不做 | 谁决定 | 何时回看 |
@@ -238,9 +349,11 @@ B 机回答 → postInRound → mirrorLine → Hub → A 机 receiveRemote → �
 | 16 | **人员没有显示名**：Hub `users` 表无 `display_name`，成员行显示打码手机号 | 加列属账号模型变更，且要处理两台机器一致 | 待定 | 需要「显示真实姓名」时 |
 | 17 | ~~已读游标客户端未写~~ | — | — | **已闭环（第 5 轮）** |
 | 18 | ~~成员在线状态未做~~ | — | — | **已闭环（第 5 轮）** |
-| 22 | **回复模式/管理员/工作目录/权限预设不同步到其他机器** | Hub 没有这些列，`CREATE_FIELDS` 按名字拒绝；属设计上的本地设置，不是遗漏 | 已定（见上「设置全量同步」） | 若要让两台机器一致，需先加 Hub 列 |
+| 22 | ~~回复模式不同步到其他机器~~ **已做（2026-10-25）**：`workgroups.reply_mode` + `SETTINGS_FIELDS` 加 `replyMode`，两台机器读同一个值 | — | — | 已闭环。**管理员/工作目录/权限预设仍不同步**，理由见下 |
 | 23 | 群内「谁正在看」未画（Hub 名册有 `online`，UI 未用） | 微信式群聊会显示，但需要一条成员级订阅而非每次拉名册 | 待定 | 第 5 项跟进时 |
 | 24 | 动效只在「本机在跑」时可见；别的机器上的成员干活，本机看不到 | `roomWorkView` 是**本进程**的 `live` 表，跨机活动态要新的事件类型（`presence.working`） | 待定 | 第 6 项跟进时 |
+| 25 | **管理员（`adminId`）是每台机器自己算的**：`applyRoster` 按「群主发布的 Bot → Main Bot → 第一个可答成员」选，两台机器的 Bot 集合不同，选中的人可能不同 | 原版就是这么选的（`defaultAdmin` 用 `rt.isMain`），而「Main Bot」是**每台机器自己的**概念——所以这不是漏同步，是原版模型在多机下的固有局限。要跨机一致，需要 Hub 上记一个「本群由谁接待」，那是**新增**字段，得先有产品口径 | 待定 | 需要「整个群只有一个接待者」时 |
+| 26 | **成员列表每 1.2 s 一次 HTTP 轮询**，不是推送 | 客户端与宿主之间只有一条 POST 路由（`api.js`），原版团队自己的 roster 也是 1.5 s 轮询；加流式要新传输通道 | 本轮决定 | 轮询成为瓶颈时（大群、多标签页） |
 
 ## 第 4 轮自查修复（2026-10-22）
 
@@ -295,6 +408,12 @@ B 机回答 → postInRound → mirrorLine → Hub → A 机 receiveRemote → �
 | 2026-10-22 | G5：租约 `release` 保留 epoch，不删行 | 本轮发现：删行会让旧围栏值重新有效 |
 | 2026-10-22 | G5：`newBot` 模式另建任务 Session，不复用新 Bot 的私聊 Session | 本轮发现：复用会被 `registerSessionOwner` 拒绝，且会污染该 Bot 的私人会话 |
 | 2026-10-22 | G5：任务进度在插件侧 2 秒窗口内合并 | `events` 是每个客户端都要补拉的表，不节流会无限增长 |
+| 2026-10-25 | 接受邀请只加人，**不再**自动带管家 Bot 入群；加哪个 Bot 由人决定 | 用户口径：去掉强制要求携带管家 bot 入群的限制，每个 bot 的权限由群设置 |
+| 2026-10-25 | `replyMode` 上 Hub（`workgroups.reply_mode`），管理员/工作目录/权限预设仍留在本地 | 前两项是「这个群怎么运作」，两台机器必须一致；后三项是「这台机器怎么跑」，且工作目录是 Hub 绝不能知道的路径 |
+| 2026-10-25 | Bot 的 `avatar` 以**快照**形式上 Hub，而不是让对方按 id 派生 | 原版 `lookOf()` 按 id 派生；名册给的是 `ep_…`，只能传快照 |
+| 2026-10-25 | ~~`memberships.bot_role`~~ **已废弃（v6 删除）**，Bot 权限改用原版 `room.permission` 的远程副本 | 用户口径：原版怎么做的，工作群就怎么做，只加远程同步。原版没有「每个 Bot 在群里的角色」，权限是两层模型 |
+| 2026-10-25 | `workgroups.permission` 的 `null` 是**值**不是缺省 | 原版「各用各的」就是删掉 `room.permission`；Hub 永远返回该键，`null` 才可区分「这台机器上关掉了」与「你的 Hub 没有这个设置」 |
+| 2026-10-25 | 面板刷新用 1.2 s 轮询，不上第二条推送通道 | 与原版 roster 轮询同形；一条 POST 路由是这两个域共用的边界 |
 
 ## 下一步：G5
 

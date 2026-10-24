@@ -470,7 +470,11 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
     // its own domain under the 'workgroup' source kind. Both domains share this one
     // renderer so a group chat looks the same wherever it came from.
     if (source.kind === 'workgroup') {
-      if (source.role !== 'post') return null
+      // `post` is a member's own line in this group's round. `remote` is the same kind of line with
+      // one difference that matters here: it arrived over the Hub from ANOTHER machine, so this one
+      // has already had its round and must not start another. Both are the group conversation and
+      // both are drawn the same way — the role only decides whether a round follows.
+      if (source.role !== 'post' && source.role !== 'remote') return null
       const room = roster.roomsById[sessionId]
       const poster = roster.byId[source.senderSessionId] ?? { id: source.senderSessionId, name: source.senderName ?? t('a Bot'), color: 'gray' }
       const text = stripHeader(contentText(data.content))

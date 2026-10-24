@@ -1036,6 +1036,8 @@ var ZH = {
   "Workgroup name": "工作群名称",
   "Workgroups": "工作群",
   "Workgroup": "工作群",
+  "Yours": "你的",
+  "A colleague's": "同事的",
   "Message this workgroup…": "在这个工作群里发消息…",
   "Message this workgroup": "在这个工作群里发消息",
   "Sending…": "发送中…",
@@ -1502,7 +1504,9 @@ function indexRoster(value, workgroups) {
   for (const room2 of groupRooms(workgroups)) roomsById[room2.id] = room2;
   for (const member of workgroupMembers(workgroups)) {
     const own = member.botId === void 0 ? void 0 : byId[member.botId];
-    if (byId[member.id] === void 0) byId[member.id] = own ?? member;
+    if (byId[member.id] === void 0) {
+      byId[member.id] = own ?? member;
+    }
   }
   const agentsById = {};
   const agentOf = {};
@@ -5569,7 +5573,7 @@ function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, us
   return unreadOpening ? (0, import_react9.createElement)(import_react9.Fragment, null, (0, import_react9.createElement)("div", { className: "bt-open-new" }, (0, import_react9.createElement)(NewDivider), (0, import_react9.createElement)("div", { className: "bt-time-sep", role: "separator" }, unreadOpening)), body) : body;
   function triggerBody() {
     if (source.kind === "workgroup") {
-      if (source.role !== "post") return null;
+      if (source.role !== "post" && source.role !== "remote") return null;
       const room2 = roster.roomsById[sessionId];
       const poster = roster.byId[source.senderSessionId] ?? { id: source.senderSessionId, name: source.senderName ?? t("a Bot"), color: "gray" };
       const text = stripHeader(contentText(data.content));
@@ -6588,6 +6592,47 @@ async function openWorkgroup(id) {
     setState({ error: error?.message ?? String(error) });
   }
 }
+var roomSignature = (room2) => JSON.stringify([
+  room2?.name,
+  room2?.notice,
+  room2?.mode,
+  room2?.adminId,
+  (room2?.members ?? []).map((member) => [member.id, member.name, member.role, member.mine, member.avatar]),
+  (room2?.log ?? []).map((line) => [line.seq, line.kind ?? "", line.text]),
+  room2?.hub?.cursor,
+  room2?.hub?.pending
+]);
+function useLiveRoom(roomId) {
+  (0, import_react13.useEffect)(() => {
+    if (roomId === null || roomId === void 0) return void 0;
+    let live = true;
+    let timer;
+    let running = false;
+    let last = roomSignature(store.getSnapshot().room);
+    const poll = async () => {
+      if (running) return;
+      running = true;
+      try {
+        const room2 = await callWorkgroup("room", { id: roomId });
+        if (!live) return;
+        const next = roomSignature(room2);
+        if (next !== last && store.getSnapshot().selected === roomId) {
+          last = next;
+          setState({ room: room2 });
+        }
+      } catch {
+      } finally {
+        running = false;
+        if (live) timer = setTimeout(poll, 1200);
+      }
+    };
+    void poll();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [roomId]);
+}
 async function createWorkgroup(name, members = []) {
   const room2 = await callWorkgroup("create-room", { name, members });
   await refreshWorkgroups();
@@ -6959,12 +7004,24 @@ function MemberList({ hub, members, onInvite }) {
           "aria-label": member.online === true ? t("Online") : t("Offline"),
           "data-online": member.online === true ? "true" : "false"
         }),
+        // WHO A BOT BELONGS TO.
+        //
+        // A workgroup's members come from several accounts, and two colleagues may both have a Bot
+        // called "Chief". Without this tag the roster is a list of names with no way to tell whose is
+        // whose — the user's 「需要在每个 bot 增加标识，区分每个 bot 的归属」. "Yours" is the Hub's own
+        // answer (`ownerIsYou`, computed from the authenticated connection), so it cannot be faked.
+        member.memberType === "botEndpoint" ? (0, import_react13.createElement)(RoomAvatar, { room: { members: [member.endpointId] }, size: 16 }) : null,
         (0, import_react13.createElement)(
           "span",
           { className: "bt-wg-roster-name" },
           // A Bot endpoint shows its published name; a person shows the masked number the Hub gives.
-          member.memberType === "botEndpoint" ? t("Bot") : member.phoneMasked ?? t("A member")
+          member.memberType === "botEndpoint" ? member.name ?? t("Bot") : member.phoneMasked ?? t("A member")
         ),
+        member.memberType === "botEndpoint" ? (0, import_react13.createElement)(
+          "span",
+          { className: "bt-wg-roster-owner", "data-mine": member.ownerIsYou === true ? "true" : "false" },
+          member.ownerIsYou === true ? t("Yours") : t("A colleague's")
+        ) : null,
         member.role === "owner" ? (0, import_react13.createElement)("span", { className: "bt-wg-roster-role" }, t("Owner")) : null
       ))
     ),
@@ -7005,6 +7062,7 @@ function MemberList({ hub, members, onInvite }) {
 }
 function ChatPane({ roomId, roster }) {
   const state = useWorkgroupState();
+  useLiveRoom(roomId);
   const room2 = state.room;
   const [members, setMembers] = (0, import_react13.useState)([]);
   const hubWorkgroupId = room2?.hub?.workgroupId;

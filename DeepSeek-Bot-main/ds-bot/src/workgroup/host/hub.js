@@ -420,12 +420,16 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
     // The two settings the Hub stores. Sending them is what makes a rename stick on the other
     // person's machine: without it the local record changed, the Hub kept the old value, and the
     // next roster read put it back.
-    async updateGroupSettings({ workgroupId, name, notice }) {
+    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission }) {
       const token = await ensureAccess()
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/settings`, {
         body: {
           ...(name === undefined ? {} : { name }),
           ...(notice === undefined ? {} : { notice }),
+          ...(replyMode === undefined ? {} : { replyMode }),
+          // `null` is a value here: "each member uses its own again", the original's
+          // `delete room.permission`. So it is forwarded, not skipped.
+          ...(permission === undefined ? {} : { permission }),
         },
         token,
       })
@@ -459,10 +463,19 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
       const query = workgroupId === undefined ? '' : `?workgroupId=${encodeURIComponent(workgroupId)}`
       return call(address(), `/v1/bot-endpoints${query}`, { method: 'GET', token })
     },
-    async publishBotEndpoint({ localBotId, name, capabilities, visibility }) {
+    async publishBotEndpoint({ localBotId, name, capabilities, visibility, avatar }) {
       const token = await ensureAccess()
       return call(address(), '/v1/bot-endpoints', {
-        body: { localBotId, name, ...(capabilities === undefined ? {} : { capabilities }), ...(visibility === undefined ? {} : { visibility }) },
+        body: {
+          localBotId,
+          name,
+          ...(capabilities === undefined ? {} : { capabilities }),
+          ...(visibility === undefined ? {} : { visibility }),
+          // The Bot's appearance: a shape name, a palette name, and optionally the photo's data URL.
+          // The Hub stores it with the endpoint and hands it back on every group roster, which is
+          // what makes the same Bot wear the same face on every machine.
+          ...(avatar === undefined ? {} : { avatar }),
+        },
         token,
       })
     },

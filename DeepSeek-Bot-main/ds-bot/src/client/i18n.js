@@ -987,6 +987,8 @@ const ZH = {
   "Workgroup name": "工作群名称",
   "Workgroups": "工作群",
   "Workgroup": "工作群",
+  "Yours": "你的",
+  "A colleague's": "同事的",
   "Message this workgroup…": "在这个工作群里发消息…",
   "Message this workgroup": "在这个工作群里发消息",
   "Sending…": "发送中…",

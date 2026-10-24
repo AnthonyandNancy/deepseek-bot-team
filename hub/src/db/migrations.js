@@ -385,6 +385,60 @@ export const MIGRATIONS = [
       'CREATE INDEX artifacts_expiry ON artifacts(expires_at)',
     ],
   },
+
+  {
+    // G4 修补：成员归属、Bot 头像与「谁先答」的群设置。
+    //
+    // 三处都是「两台机器必须看到同一份事实」，所以只能落在 Hub 上：
+    //
+    //   * `workgroups.reply_mode` —— 原版群有 `mode: 'admin' | 'everyone'`（谁答普通消息），
+    //     而 Hub 只存 name/notice，于是两台机器各按自己的默认值决定回合，同一条消息在两台机器上
+    //     由不同的成员先答。这是用户报的「同事如果没有点名 @ 其他同事的 bot，跟原群聊一样由管理员
+    //     接待」：回合逻辑（`openingSpeakers`）本来就是原版的复制件，缺的是这个设置从没离开过那
+    //     台机器。默认 `'admin'`，与原版 `buildRoom` 的默认值一致。
+    //
+    //   * `bot_endpoints.avatar` —— 形象与颜色的**快照**（JSON `{shape, color, image?}`）。
+    //     必须是快照，不能靠对方机器去查：原版 `lookOf()` 用 Bot 自己的 id 派生形象和颜色，而 Hub
+    //     名册给的是 `ep_…`，于是同一个 Bot 在别人机器上换了长相——用户报的「每个 bot 的头像是
+    //     不能变的，现在是变了」。随发布一并写上，成员行据此还原。只存三项：形状名、调色板名、
+    //     头像 data URL；没有路径、没有文件、没有模型名。
+    //
+    //   * `memberships.bot_role` —— 「每个 bot 的权限由群设置决定」的落点：一个成员 Bot 在本群是
+    //     接待者（`lead`）还是普通成员（`member`）。原版群没有这个概念（本地群成员全是自己人），
+    //     但工作群去掉「强制管家入群」之后必须另有地方指定谁接待，且两边都要读到同一个值。
+    version: 5,
+    statements: [
+      "ALTER TABLE workgroups ADD COLUMN reply_mode TEXT NOT NULL DEFAULT 'admin'",
+      'ALTER TABLE bot_endpoints ADD COLUMN avatar TEXT',
+      "ALTER TABLE memberships ADD COLUMN bot_role TEXT NOT NULL DEFAULT 'member'",
+    ],
+  },
+
+  {
+    // G4 修补（第二轮）：Bot 权限改用**原版已有的模型**，不发明新概念。
+    //
+    // v5 给 `memberships` 加过一个 `bot_role`（`lead` / `member`），想用它表达「这个 Bot 在群里
+    // 能做什么」。那是我自己造的概念，原版没有，而且它没有写入方，恒为 `'member'`。用户指出方向：
+    // 「原版群聊是如何做的，那么工作群和工作群跨用户 bot 也是这么做，只是工作群需要远程同步」。
+    //
+    // 原版的做法（`src/host/permissions.js`）是**两层的，没有「每个 Bot 的角色」**：
+    //
+    //   `bot.permission`  —— Bot 自己的预设；
+    //   `room.permission` —— 整个群共用一个预设，覆盖每个成员的；
+    //   缺席              —— 各成员用自己的（`applyPermission`：`room?.permission ?? bot.permission`）。
+    //
+    // 工作群早就复制了这一整套，界面也有「Same for every member」那张卡。缺的只是这个值不过 Hub，
+    // 于是同事机器上 `room.permission` 是空的，同一个群按两套权限跑。`workgroups.permission` 就是
+    // 原版这个字段的远程副本，NULL 表示「各用各的」，与本地群一致。
+    //
+    // `memberships.bot_role` 随之删除：它描述的语义已经被 `permission` 覆盖，留着只会让人以为还有
+    // 第二个权限开关。
+    version: 6,
+    statements: [
+      'ALTER TABLE workgroups ADD COLUMN permission TEXT',
+      'ALTER TABLE memberships DROP COLUMN bot_role',
+    ],
+  },
 ]
 
 export const LATEST_VERSION = MIGRATIONS.at(-1)?.version ?? 0

@@ -74,6 +74,66 @@ export async function openWorkgroup(id) {
   }
 }
 
+// KEEP THE OPEN GROUP LIVE.
+//
+// `openWorkgroup` reads the room once, and nothing read it again. So a line that arrived while the
+// group was on screen — the colleague's Bot answering, a member joining, a rename made on another
+// machine — was written to disk by the host and never reached the screen until the group was closed
+// and reopened. That is the reported 「邀请同事加入后，消息并没有实时更新」.
+//
+// Polling, not push, and deliberately: this client talks to the host over one POST route with no
+// stream (`api.js`), which is the same shape the original team's own client uses — its roster poll
+// runs every 1.5 s (`src/client/index.js`). A second transport for the workgroup alone would be a
+// second thing to keep working.
+//
+// It polls only while a group is open, and stops when it closes, so a closed panel costs nothing.
+// A read that finds nothing new does not touch the store: `roomSignature` is compared first, and a
+// set() with an equal snapshot is what would otherwise re-render the transcript several times a
+// second.
+const roomSignature = room => JSON.stringify([
+  room?.name,
+  room?.notice,
+  room?.mode,
+  room?.adminId,
+  (room?.members ?? []).map(member => [member.id, member.name, member.role, member.mine, member.avatar]),
+  (room?.log ?? []).map(line => [line.seq, line.kind ?? '', line.text]),
+  room?.hub?.cursor,
+  room?.hub?.pending,
+])
+
+export function useLiveRoom(roomId) {
+  useEffect(() => {
+    if (roomId === null || roomId === undefined) return undefined
+    let live = true
+    let timer
+    let running = false
+    let last = roomSignature(store.getSnapshot().room)
+    const poll = async () => {
+      if (running) return
+      running = true
+      try {
+        const room = await callWorkgroup('room', { id: roomId })
+        if (!live) return
+        const next = roomSignature(room)
+        // Only the group that is still on screen may write: a slow answer for a group the user
+        // already left must not replace the one they are reading.
+        if (next !== last && store.getSnapshot().selected === roomId) {
+          last = next
+          setState({ room })
+        }
+      } catch {
+        // A failed read is not an error to show: the group is already on screen, and the next tick
+        // tries again. The connection line reports the host being down.
+      } finally {
+        running = false
+        if (live) timer = setTimeout(poll, 1200)
+      }
+    }
+    void poll()
+    return () => { live = false; clearTimeout(timer) }
+  }, [roomId])
+}
+
 // Create a workgroup directly, then select it. Returns the created room so the caller
 // (the new-chat menu) can navigate to it. `members` is what makes the room answerable.
 export async function createWorkgroup(name, members = []) {
@@ -483,9 +543,22 @@ function MemberList({ hub, members, onInvite }) {
           'aria-label': member.online === true ? t('Online') : t('Offline'),
           'data-online': member.online === true ? 'true' : 'false',
         }),
+      // WHO A BOT BELONGS TO.
+      //
+      // A workgroup's members come from several accounts, and two colleagues may both have a Bot
+      // called "Chief". Without this tag the roster is a list of names with no way to tell whose is
+      // whose — the user's 「需要在每个 bot 增加标识，区分每个 bot 的归属」. "Yours" is the Hub's own
+      // answer (`ownerIsYou`, computed from the authenticated connection), so it cannot be faked.
+      member.memberType === 'botEndpoint'
+        ? h(RoomAvatar, { room: { members: [member.endpointId] }, size: 16 })
+        : null,
       h('span', { className: 'bt-wg-roster-name' },
         // A Bot endpoint shows its published name; a person shows the masked number the Hub gives.
-        member.memberType === 'botEndpoint' ? t('Bot') : member.phoneMasked ?? t('A member')),
+        member.memberType === 'botEndpoint' ? member.name ?? t('Bot') : member.phoneMasked ?? t('A member')),
+      member.memberType === 'botEndpoint'
+        ? h('span', { className: 'bt-wg-roster-owner', 'data-mine': member.ownerIsYou === true ? 'true' : 'false' },
+          member.ownerIsYou === true ? t('Yours') : t("A colleague's"))
+        : null,
       member.role === 'owner' ? h('span', { className: 'bt-wg-roster-role' }, t('Owner')) : null))),
     // Publishing is what makes this machine's Bots addressable in a group. It is a button rather
     // than something automatic on every panel open, because it is a decision about what this machine
@@ -510,6 +583,9 @@ function MemberList({ hub, members, onInvite }) {
 
 function ChatPane({ roomId, roster }) {
   const state = useWorkgroupState()
+  // The open group is re-read while it is on screen, so a line that arrives from another machine
+  // appears without closing and reopening it.
+  useLiveRoom(roomId)
   const room = state.room
   // The Hub roster is fetched separately from the room, because it lives on the Hub and the room
   // lives here: a Hub that is down must not stop the conversation that is already on screen.
