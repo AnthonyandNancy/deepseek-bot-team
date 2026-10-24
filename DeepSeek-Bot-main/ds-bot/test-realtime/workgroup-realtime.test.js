@@ -127,7 +127,16 @@ async function openMachine(t, { baseUrl, phone, home, root, name = 'machine' }) 
   const rt = createRuntime(ctx, { home })
   t.after(async () => {
     await rt.workgroup?.bridge?.stop?.().catch?.(() => {})
+    // Flush BEFORE disposing: the effect that disposes state refuses later writes, so a save queued
+    // after that point can still be in flight when the temp home is removed. Waiting here keeps the
+    // teardown quiet and makes the test's temp directory safe to delete.
+    await rt.workgroup?.flushSave?.().catch?.(() => {})
     await ctx.dispose()
+    // A late `removeDir`/save continuation can still hold the state queue after dispose. Let the
+    // event loop drain once before deleting the home; otherwise a test-only ENOENT warning appears
+    // from a write that no longer matters.
+    await new Promise(resolve => setTimeout(resolve, 25))
+    await rt.workgroup?.flushSave?.().catch?.(() => {})
     if (root !== undefined) rmSync(root, { recursive: true, force: true, maxRetries: 5 })
   })
   const wg = rt.workgroup
@@ -200,6 +209,12 @@ async function invitedPair(t) {
   const joined = await bob.wg.bridge.joinWithPrimaryBot({ workgroupId })
   assert.equal(joined.length, 1, 'Bob brings his own Bot explicitly')
   return { baseUrl, alice, bob, workgroupId }
+}
+
+
+// Writes a projection through the public seam, matching how a live round persists itself.
+function wgPersistRound(wg, round) {
+  return wg.persistRound(round)
 }
 
 function roomOf(machine, workgroupId) {
@@ -739,6 +754,90 @@ test('stopping a round while a remote call is out keeps it stopped', async (t) =
   assert.equal(record.slots[0].status, 'stopped', 'and its slot did not turn into missed/posted')
 })
 
+// 9b. A RECOVERED OBLIGATION IS CONTINUED BY THE HUB ANSWER, EXACTLY ONCE.
+//
+// After a restart the waiting slot lives only in `state.json`. The answer arrives through the Hub,
+// possibly during replay before any UI reads the room. The reconciler must consume that answer into
+// the existing round, mark the slot posted, and must not open a second relay or duplicate the line.
+test('a recovered waiting slot is continued by the matching Hub answer, once', async (t) => {
+  const { baseUrl } = await withHub(t)
+  const alice = await machine(t, { baseUrl, phone: ALICE, team: ALICE_TEAM, name: 'reconcile-alice' })
+  const bob = await machine(t, { baseUrl, phone: BOB, team: BOB_TEAM, name: 'reconcile-bob' })
+  await until(() => alice.wg.bridge.status().connected && bob.wg.bridge.status().connected, { label: 'both sockets' })
+  const created = await alice.call('create-room', {
+    name: '对账恢复',
+    members: [{ id: 'a', name: 'Chief', kind: 'localBot' }],
+  })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+  const workgroupId = created.value.hub.workgroupId
+  await alice.call('invite-member', { workgroupId, phone: BOB })
+  const incoming = await bob.call('group-invites', {})
+  await bob.call('answer-invite', { inviteId: incoming.value.incoming[0].inviteId, accept: true })
+  await bob.wg.bridge.joinWithPrimaryBot({ workgroupId })
+  const room = roomOf(alice, workgroupId)
+  await until(() => (room.members ?? []).some(member => member.name === 'BobChief'),
+    { label: "BobChief in Alice's roster" })
+  const remote = room.members.find(member => member.name === 'BobChief')
+
+  // A durable open round that already sent its call. It is written through the projection API, then
+  // Alice's process is replaced before any answer can reach the old runtime.
+  const exchangeId = 'exchange-recover-1'
+  const roundId = 'round-recover-1'
+  wgPersistRound(alice.wg, {
+    id: roundId,
+    roomId: room.id,
+    startSeq: room.seq + 1,
+    slots: [
+      { id: 'a', name: 'Chief', status: 'posted' },
+      { id: remote.id, name: remote.name, status: 'remote', exchangeId, by: 'a', note: 'Chief mentioned you' },
+    ],
+    replies: [],
+    passed: [],
+    failed: [],
+    started: [],
+    turns: 1,
+  })
+  await alice.wg.flushSave()
+  const sent = await alice.wg.deliverRemote({
+    room,
+    member: remote,
+    round: { id: roundId },
+    slot: { exchangeId, roundId, note: 'Chief mentioned you', by: 'a' },
+  })
+  assert.equal(sent.sent, true, JSON.stringify(sent))
+  await alice.wg.bridge.stop()
+  await alice.wg.flushSave()
+  await alice.ctx.dispose()
+
+  const restarted = await openMachine(t, { baseUrl, phone: ALICE, home: alice.home, root: join(alice.home, '..', 'bot-restart-reconcile'), name: 'reconcile-alice-restart' })
+  await until(() => restarted.wg.bridge.status().connected, { label: 'Alice reconnects' })
+
+  // Bob's called Bot answers under the original exchange. The answer is already in the Hub before the
+  // restarted machine explicitly reconciles, which is the replay path that lost it.
+  const bobStart = (bob.followups ?? []).filter(entry => entry.message?.source?.role === 'room').at(-1)
+  if (bobStart !== undefined) {
+    const emit = async (event) => {
+      for (const listener of bob.rt.ctx.listeners.get('session/event') ?? []) await listener({ id: bobStart.sessionId }, event)
+    }
+    await emit({ type: 'turn/start', data: { turn: 1 } })
+    await emit({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '恢复后的答复' }] } } })
+    await emit({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  }
+  await until(async () => {
+    const page = await alice.wg.hub.events({ workgroupId, afterSeq: 0 })
+    return (page.events ?? []).some(event => event.payload?.exchangeId === exchangeId)
+  }, { label: 'the answer to reach the Hub log' })
+
+  const before = (roomOf(restarted, workgroupId)?.log ?? []).filter(line => line.text === '恢复后的答复').length
+  await restarted.wg.reconcileRounds(workgroupId)
+  await until(() => restarted.wg.roundOf(roundId)?.slots?.find(slot => slot.exchangeId === exchangeId)?.status === 'posted',
+    { label: 'the recovered slot to be posted' })
+  const record = restarted.wg.roundOf(roundId)
+  assert.equal(record.state, 'open', 'the recovered round is still the open obligation it was')
+  const after = (roomOf(restarted, workgroupId)?.log ?? []).filter(line => line.text === '恢复后的答复').length
+  assert.ok(after <= 1, `the recovered answer is not duplicated: ${JSON.stringify({ before, after })}`)
+})
+
 // 9. A REMOTE SLOT IS AN OBLIGATION, NOT A PROCESS-LOCAL PROMISE.
 //
 // A round waiting on another machine holds an exchange id in memory. If the coordinator process is
@@ -797,8 +896,9 @@ test('a remote slot survives a coordinator restart as an open obligation', async
   // Replace the process, not the home. Every in-memory round and waiter disappears; the state file
   // and the Hub account remain, which is what a real coordinator restart looks like.
   await alice.wg.bridge.stop()
+  await alice.wg.flushSave()
   await alice.ctx.dispose()
-  const restarted = await openMachine(t, { baseUrl, phone: ALICE, home: alice.home, name: 'persist-alice-restart' })
+  const restarted = await openMachine(t, { baseUrl, phone: ALICE, home: alice.home, root: join(alice.home, '..', 'bot-restart-persist'), name: 'persist-alice-restart' })
   await until(() => restarted.wg.bridge.status().connected, { label: 'the restarted coordinator to reconnect' })
   await restarted.wg.load()
 

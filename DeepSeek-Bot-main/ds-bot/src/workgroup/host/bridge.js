@@ -276,6 +276,13 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
             .catch(error => logger?.warn?.('ds-bot: roster of %s not read: %s', workgroupId, error?.message ?? error))
         }
         emit('connected', { userId: frame.userId, deviceId: frame.deviceId, workgroups: frame.workgroups ?? [] })
+        // A coordinator restart keeps round obligations on disk but loses every in-memory waiter.
+        // After the greeting and roster are available, reconcile those obligations from the Hub log.
+        // Best effort: a reconciler failure must not stop live traffic.
+        for (const workgroupId of frame.workgroups ?? []) {
+          void Promise.resolve(wg.reconcileRounds?.(workgroupId))
+            .catch(error => logger?.warn?.('ds-bot: rounds of %s not reconciled: %s', workgroupId, error?.message ?? error))
+        }
         return
       }
       case 'event': {
@@ -290,7 +297,12 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
         return
       }
       case 'sync.batch': {
-        void applyBatch(frame.workgroupId, frame.events ?? [])
+        void Promise.resolve(applyBatch(frame.workgroupId, frame.events ?? []))
+          // The replay just put any matching answer into the log; close recovered slots from that
+          // same authoritative page. Doing it after the batch, not before, means the local-log fast
+          // path handles normal answers and the Hub read is only the fallback.
+          .then(() => wg.reconcileRounds?.(frame.workgroupId))
+          .catch(error => logger?.warn?.('ds-bot: rounds of %s not reconciled after sync: %s', frame.workgroupId, error?.message ?? error))
         // `hasMore` means the Hub capped the page. Ask again from where this batch ended rather
         // than waiting for the next event to reveal the rest.
         if (frame.hasMore === true) {

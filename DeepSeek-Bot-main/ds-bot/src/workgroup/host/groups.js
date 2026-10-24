@@ -1735,6 +1735,21 @@ export function install(wg) {
         break
       }
     }
+    // A RECOVERED OBLIGATION IS CLOSED BY THE ORDINARY ANSWER PATH.
+    //
+    // After a restart there is no live `remoteWaiters`, but the persisted record may still say this
+    // exact exchange is remote. The line above is the authority; mark that slot posted here so a
+    // later reconciler does not re-deliver the same answer. Only an open record is touched: a stopped
+    // one stays terminal.
+    if (typeof payload.exchangeId === 'string' && payload.exchangeId !== '') {
+      for (const record of Object.values(wg.state.rounds ?? {})) {
+        if (record.roomId !== room.id || record.state !== 'open') continue
+        const slot = (record.slots ?? []).find(entry => entry.exchangeId === payload.exchangeId)
+        if (slot === undefined || slot.status !== 'remote') continue
+        slot.status = 'posted'
+        wg.persistRound(record)
+      }
+    }
     // Name the group in the save notification so an open window can re-read just this room. The
     // line may have arrived while the panel was idle; this is what turns the Hub event into a UI
     // refresh without waiting for the 700 ms poll.
@@ -2642,6 +2657,58 @@ export function install(wg) {
   }
   wg.stopRound = stopRound
   wg.wasStopped = exchangeId => stoppedExchanges.has(exchangeId)
+
+  // RECONCILE A PROJECTION WITH THE AUTHORITY.
+  //
+  // A coordinator restart throws away the live round but keeps `state.rounds`. The Hub still has the
+  // call and may already have the answer. This reads the open records and asks the Hub log for the
+  // exchange each remote slot is waiting on. Matching answers go through the ordinary
+  // `receiveRemote` seam, so they are logged once (by `hubEventId`) and the slot is marked posted.
+  //
+  // It deliberately does NOT re-run a member or start a relay: a recovered answer is a line, not a
+  // new opener. A stopped record is terminal and is never touched. Failures are reported and do not
+  // stop other rooms: a Hub that is down leaves the obligation exactly as it was.
+  async function reconcileRounds(roomId) {
+    await wg.load()
+    const records = Object.values(wg.state.rounds ?? {})
+    for (const record of records) {
+      if (record.state !== 'open') continue
+      const room = wg.workgroupOf(record.roomId)
+      if (roomId !== undefined && record.roomId !== roomId && room?.hubWorkgroupId !== roomId) continue
+      if (room === undefined) {
+        // The group was deleted locally: nothing can continue this record.
+        wg.dropRound(record.roundId)
+        continue
+      }
+      let changed = false
+      for (const slot of record.slots ?? []) {
+        if (slot.status !== 'remote' || typeof slot.exchangeId !== 'string') continue
+        const local = (room.log ?? []).find(line => line.exchangeId === slot.exchangeId)
+        if (local !== undefined) {
+          slot.status = 'posted'
+          changed = true
+          continue
+        }
+        if (room.hubWorkgroupId === undefined) continue
+        let page
+        try {
+          page = await wg.hub.events({ workgroupId: room.hubWorkgroupId, afterSeq: Math.max(0, (record.startSeq ?? 1) - 1) })
+        } catch (error) {
+          rt.warn('ds-bot: round %s not reconciled: %s', record.roundId, error?.message ?? error)
+          continue
+        }
+        const event = (page.events ?? []).find(entry => entry?.payload?.exchangeId === slot.exchangeId)
+        if (event === undefined) continue
+        const applied = await wg.receiveRemote?.({ workgroupId: room.hubWorkgroupId, event })
+        if (applied === true) {
+          slot.status = 'posted'
+          changed = true
+        }
+      }
+      if (changed) wg.persistRound(record)
+    }
+  }
+  wg.reconcileRounds = reconcileRounds
 
   // COPY OF THE ORIGINAL `stopMemberWork`: stop ONE member of a round. The original reads
   // `rt.live`, which holds the local domain's turns; this domain's rounds live in
