@@ -78,26 +78,24 @@ const catchError = (fn) => {
   return undefined
 }
 
-test('migration 7 is the newest, so a Hub from G5 upgrades rather than refusing to start', () => {
-  // Migration 5 added the shared reply mode and a Bot's published appearance.
-  // Migration 6 adds the group's shared permission preset and DROPS `memberships.bot_role`.
-  // Migration 7 adds `workgroups.lead_membership_id`: which member leads the group, decided once by
-  // the owner's machine instead of derived per machine.
-  //
-  // Both are in-place: v5 is additive (`ADD COLUMN` with a default), and v6's `DROP COLUMN` is
-  // supported by the SQLite this Hub ships with. A G5 Hub therefore starts and upgrades rather than
-  // refusing, which is what this asserts.
-  assert.equal(LATEST_VERSION, 7)
+test('a G5 database upgrades through the memory migration rather than refusing to start', () => {
+  // Migrations 5 and 6 are the G4 repairs; v7 added `workgroups.lead_membership_id`. G6's v8 adds
+  // the shared memory tables. The version assertion moves with each phase: what it protects is that
+  // an existing Hub file is upgraded in place, not that any particular number is eternal.
+  assert.equal(LATEST_VERSION, 8)
 })
 
-test('the four G5 tables exist and nothing from G6 arrived early', (t) => {
+test('the four G5 tables exist and the G6 tables arrived with migration 8', (t) => {
   const { db } = withDatabase(t)
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name)
   for (const table of ['tasks', 'approvals', 'round_leases', 'artifacts']) {
     assert.ok(names.includes(table), `${table} must exist after migration 4`)
   }
-  // Same rule as the absent `otp_challenges` and `group_memories`: an empty table reads as "done".
-  assert.equal(names.includes('group_memories'), false, 'group_memories is G6')
+  // G6 landed: the store is no longer allowed to be absent, and `db-g6-schema.test.js` owns its
+  // shape. Keeping the names here makes a future migration that drops them fail loudly.
+  for (const table of ['group_memories', 'group_memory_events', 'group_memories_fts']) {
+    assert.ok(names.includes(table), `${table} must exist after migration 8`)
+  }
 })
 
 test('a task id is the primary key, so a redelivered request cannot become a second task', (t) => {

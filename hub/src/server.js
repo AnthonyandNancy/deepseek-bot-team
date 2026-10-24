@@ -26,6 +26,7 @@ import { createAttachmentService, MAX_ATTACHMENT_BYTES } from './attachments/ser
 import { createTaskService } from './tasks/service.js'
 import { createArtifactService, MAX_ARTIFACT_BYTES } from './artifacts/service.js'
 import { createLeaseService } from './leases/service.js'
+import { createMemoryService } from './memories/service.js'
 
 export function createHub({ config = loadConfig(), logger = createLogger(), now = () => Date.now(), database } = {}) {
   const db = database ?? openDatabaseIn(config.dataDir)
@@ -54,6 +55,12 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
   })
   const artifacts = createArtifactService({ db, audit, dataDir: config.dataDir, now })
   const leases = createLeaseService({ db, audit, now, workgroups })
+  // G6: every memory write rides the group's existing seq and replay path. The socket is assigned
+  // later, so the fan-out reads it lazily, like the task service does.
+  const memories = createMemoryService({
+    db, audit, now, events: eventsService,
+    onMemoryEvent: payload => wsService?.broadcast?.(payload.workgroupId, payload.event),
+  })
   // Attachments live beside the database, in the data directory this Hub already owns. Nothing
   // outside that directory is ever read or written.
   const attachments = createAttachmentService({ db, audit, dataDir: config.dataDir, now })
@@ -356,6 +363,44 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
     })
   })
 
+  // ── group memory (§11, §13.1) ─────────────────────────────────────────────────────
+  // Every call reaches `memories.*`, which starts with the same active-membership check. The
+  // routes do not filter rows themselves: doing it twice is how the two answers drift apart.
+  router.get('/v1/workgroups/:id/memories', ({ params, headers }) => {
+    const session = caller(headers)
+    return memories.list({ userId: session.user_id, workgroupId: params.id })
+  })
+  router.get('/v1/workgroups/:id/memories/search', ({ params, headers, req }) => {
+    const session = caller(headers)
+    return memories.search({
+      userId: session.user_id, workgroupId: params.id,
+      query: queryOf(req).get('q') ?? '', limit: 50,
+    })
+  })
+  router.post('/v1/workgroups/:id/memories', async ({ params, body, headers }) => {
+    const session = caller(headers)
+    return created(await memories.create({
+      userId: session.user_id, workgroupId: params.id,
+      type: body?.type, content: body?.content, sourceRefs: body?.sourceRefs,
+      acl: body?.acl, expiresAt: body?.expiresAt,
+    }))
+  })
+  router.post('/v1/workgroups/:id/memories/:memoryId/correct', async ({ params, body, headers }) => {
+    const session = caller(headers)
+    return memories.correct({
+      userId: session.user_id, workgroupId: params.id, memoryId: params.memoryId,
+      content: body?.content, sourceRefs: body?.sourceRefs, acl: body?.acl,
+      expectedVersion: body?.expectedVersion,
+    })
+  })
+  router.post('/v1/workgroups/:id/memories/:memoryId/delete', ({ params, body, headers }) => {
+    const session = caller(headers)
+    return memories.remove({
+      userId: session.user_id, workgroupId: params.id, memoryId: params.memoryId,
+      expectedVersion: body?.expectedVersion,
+    })
+  })
+
   // ── the coordinator lease (§9.5) ────────────────────────────────────────────────
   // The plan gives the semantics (`coordinatorEpoch / leaseUntil`) and no route. These are the
   // addition this phase records in gates.md: without a way to acquire a lease the fence could only
@@ -413,6 +458,7 @@ export function createHub({ config = loadConfig(), logger = createLogger(), now 
     tasks,
     artifacts,
     leases,
+    memories,
     ws: wsService,
 
     async listen() {
