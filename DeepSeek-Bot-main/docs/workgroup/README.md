@@ -32,6 +32,7 @@
 | `CONVERSION.md` | G0–G3 阶段文档的转换规则、证据口径、与手写文档的关系 |
 | `g6r/NEXT-INSTRUCTION.md` | **G6R 纠偏续接指令**：复用原版群记忆引擎，Hub 只做跨机传输 |
 | `g6r/DESIGN-COPY-FIRST.md` | G6R 设计与取舍、与 G6 的逐项对比 |
+| `g6r/IN-PLACE-CONVERSION.md` | **在 G6 分支上原地改造的续接指令**：保留/删除/改接清单 |
 | `g6/NEXT-INSTRUCTION.md` | **已被 G6R 取代**：旧 G6 方案（自建 `group_memories`），仅作反例 |
 | `g6/EVIDENCE-MATRIX.md` | **历史**：被否决的 G6 证据（自建 `group_memories`） |
 | `g6/ROUND-LOG.md` | **历史**：G6 轮次与计划偏差 |
