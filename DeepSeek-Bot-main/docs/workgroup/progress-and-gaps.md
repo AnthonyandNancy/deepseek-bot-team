@@ -16,7 +16,7 @@
 | G3 Hub 账号与设备 | 通过 | `hub-store`、`hub-client`、`hub-account-switch`、`hub-offline`；Hub 侧 123 测试 | 认证为手机号 + 密码，无 OTP |
 | G4 双机实时群聊与升级 | **自动部分通过（含 2 轮自查修复）** | `gates.md` 的门禁 2/3/4/5 + G4-A1..A19 + F1–F5 + G1–G3；hub 190 / ds-bot 990 | 门禁 1/6 与 T20 待人工；不发版 |
 | G5 跨用户委派与本人审批 | **自动部分通过（含补修轮）** | `g5/EVIDENCE-MATRIX.md`；hub 256 / ds-bot 1033 | 门禁 2 真机一半、N3 待人工 |
-| G4/G5 后补缺陷（lead 回填、发布包） | **已闭环（自动部分）** | `workgroup-membership.test.js` 18–22、`package-files.test.js`；ds-bot 1131 pass / 1 skip / 0 fail，hub 267 pass | app 安装副本重装与重启待维护者执行 |
+| G4/G5 后补缺陷（lead 回填、发布包） | **已闭环（自动部分）** | `workgroup-membership.test.js` 18–22、`package-files.test.js`；ds-bot 1131 pass / 1 skip / 0 fail，hub 268 pass | app 安装副本重装与重启待维护者执行 |
 | G4/G5 修补轮（轮次持久化、对账、设置版本、任务幂等、Stop 持久、全量门禁） | **已闭环（自动部分）** | `docs/workgroup/gates.md` 的「G4/G5 修补轮」；人工项仍 BLOCKED | 不改阶段水位，不虚报人工结论 |
 | 人工验收 | 待执行 | `manual-checklist.md` | 由维护者执行 |
 | 发版 | 未执行 | `ds-bot` 源码 0.2.3；未发版 | 需求明确不发版 |

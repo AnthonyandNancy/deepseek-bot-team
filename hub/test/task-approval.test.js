@@ -309,6 +309,28 @@ test('the task events share the group seq with chat, and unread counts only mess
   await socket.close()
 })
 
+test('a same-state report still cannot use a stale version', async (t) => {
+  const { hub, alice, bob, workgroupId, endpoint } = await scene(t)
+  const taskId = await submitTask({ hub, alice, bob, workgroupId, endpoint })
+  await hub.post(`/v1/tasks/${taskId}/decision`, { decision: 'granted' }, { token: bob.token })
+
+  const socket = connect(hub, bob)
+  await socket.hello()
+  let from = socket.cursor
+  socket.send({ type: 'task.report', taskId, next: 'ASSIGNED' })
+  await socket.next(message => message.type === 'task.reported', { from })
+  from = socket.cursor
+  socket.send({ type: 'task.report', taskId, next: 'RUNNING' })
+  const started = await socket.next(message => message.type === 'task.reported', { from })
+
+  from = socket.cursor
+  socket.send({ type: 'task.report', taskId, next: 'RUNNING', version: Math.max(0, started.version - 1) })
+  const stale = await socket.next(message => message.type === 'task.reported' || message.type === 'error', { from })
+  assert.equal(stale.type, 'error', JSON.stringify(stale))
+  assert.match(stale.code, /task\/version-conflict/)
+  await socket.close()
+})
+
 test('a replayed RUNNING report is an idempotent acknowledgement', async (t) => {
   const { hub, alice, bob, workgroupId, endpoint } = await scene(t)
   const taskId = await submitTask({ hub, alice, bob, workgroupId, endpoint })

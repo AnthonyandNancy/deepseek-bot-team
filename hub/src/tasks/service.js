@@ -138,12 +138,12 @@ export function createTaskService({ db, audit, now = () => Date.now(), workgroup
     // A device can lose the answer to its own `RUNNING` report and resend it after reconnecting (or
     // after a restart adopted the task). The state has not moved, so accepting it changes nothing and
     // must not bump the version. Other illegal moves stay refused.
+    if (expected !== undefined && expected !== row.version) {
+      throw conflict('task/version-conflict', `That task moved on (version ${row.version}, not ${expected}).`)
+    }
     if (next === row.state) return byId.get(row.id)
     if (!allowedNext(row.state).includes(next)) {
       throw conflict('task/transition-refused', `${row.state} → ${next} is not a transition plan §10.2 allows.`)
-    }
-    if (expected !== undefined && expected !== row.version) {
-      throw conflict('task/version-conflict', `That task moved on (version ${row.version}, not ${expected}).`)
     }
     // Gate 3's other half: work begins on the owner's device or not at all. Stated here rather than
     // only at the decision, because a later `started` report must not be able to introduce one.

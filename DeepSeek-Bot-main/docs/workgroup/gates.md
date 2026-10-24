@@ -379,7 +379,7 @@ Hub 仍是唯一有序源；`src/host/` 仍是零改动。
 
 | 命令 | 结果 |
 |---|---|
-| `cd hub && npm test` | **267 pass / 0 fail** |
+| `cd hub && npm test` | **268 pass / 0 fail** |
 | `cd ds-bot && npm test` | **1132 tests，1131 pass / 0 fail / 1 skip**（全量两次均 exit 0） |
 | `cd ds-bot && node scripts/build-client.mjs --check` | exit 0 |
 | `cd ds-bot && npm run lint` | 0 error / 13 warning（与基线相同） |
