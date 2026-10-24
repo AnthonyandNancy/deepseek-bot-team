@@ -1350,20 +1350,48 @@ git commit -m "fix(workgroup): archive the original group memory when a workgrou
 ### Task 12: 两机真实传播
 
 **Files:**
+- Create: `ds-bot/test-realtime/helpers-pair.js`
+- Modify: `ds-bot/test-realtime/workgroup-realtime.test.js`（改为从新文件 import 同一批 helper）
 - Create: `ds-bot/test-realtime/workgroup-memory-sync.test.js`
-- Reuse: `ds-bot/test-realtime/helpers-pair.js` 已导出的 `invitedPair` / `until` / `roomOf`（`main` 上就存在，
-  `workgroup-realtime.test.js:22-25` 已经在用；**不需要抽取，也不要复制第二份**）
 
 **Interfaces:**
 - 两台 Runtime、真 Hub、两个账号、同一工作群。
 - A 用**原版 `remember` 工具**（成员 Session 内，默认写群记忆）写一条；B 的 `memory-view` 无需手动刷新即可看到。
 - B 离群后 A 再写，B 不再收到。
 
-**为什么不用 `memory-ask`：** 它要发一次模型调用，而 realtime 夹具的 `llm` 只有
-`listProviders: () => []`（`helpers-pair.js:88`），没有可脚本化的模型回复。`remember` 是原版引擎
-的同一个 `addEntry` 写路径，不需要模型，更直接地证明“原版写入会被跨机同步”。
+**为什么先抽取夹具：** `main` 上 `withHub` / `openMachine` / `until` / `invitedPair` /
+`roomOf` / `lineByText` 都是 `workgroup-realtime.test.js` 里的**私有函数**
+（`:56`、`:86`、`:157`、`:188`、`:220`、`:224`），没有 `export`。第二个测试文件要用它们，
+必须先抽到一个导出文件；复制一份是第二套夹具，明令禁止。
 
-- [ ] **Step 1: 写测试**
+**为什么不用 `memory-ask`：** 它要发一次模型调用，而 realtime 夹具的 `llm` 只有
+`listProviders: () => []`，没有可脚本化的模型回复。`remember` 是原版引擎的同一个 `addEntry`
+写路径，不需要模型，更直接地证明“原版写入会被跨机同步”。
+
+- [ ] **Step 1: 抽取共享夹具**
+
+把 `withHub`、`openMachine`、`until`、`invitedPair`、`roomOf`、`lineByText`，连同它们依赖的
+常量（`PASSWORD`、`ALICE`、`BOB`、`TEAM`、`ALICE_TEAM`、`BOB_TEAM` 等）从
+`workgroup-realtime.test.js` **原样移动**到 `helpers-pair.js`，加 `export`；原文件改成
+
+```js
+import {
+  ALICE, BOB, ALICE_TEAM, BOB_TEAM, PASSWORD,
+  withHub, openMachine, until, invitedPair, roomOf, lineByText,
+} from './helpers-pair.js'
+```
+
+`machine` 若只被 `helpers-pair.js` 内部使用，就不导出。
+
+- [ ] **Step 2: 先跑原 realtime 套件，确认抽取没有改变行为**
+
+Run:
+```bash
+cd ds-bot && node --import ./test/harness-resolve.mjs --test --test-force-exit test-realtime/workgroup-realtime.test.js
+```
+Expected: 与抽取前同样的全绿（记录条数，抽取后必须一致）。
+
+- [ ] **Step 3: 写跨机测试**
 
 ```js
 // ds-bot/test-realtime/workgroup-memory-sync.test.js
@@ -1392,10 +1420,10 @@ test('a group memory entry written on one machine reaches the other, through the
 })
 ```
 
-> `sessionFor(room, member)` 是产品方法（`groups.js:1373` 附近注册 member Session）；`remember`
-> 工具的 execute 参数与 `memory.test.js` 相同：`({ ...args }, { agent: { id } })`。
+> `sessionFor(room, member)` 是产品方法（`groups.js:1373` 附近注册 member Session）；
+> `remember` 工具的 execute 参数与 `memory.test.js` 相同：`({ ...args }, { agent: { id } })`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [ ] **Step 4: 跑测试确认失败**
 
 Run:
 ```bash
@@ -1403,22 +1431,19 @@ cd ds-bot && node --import ./test/harness-resolve.mjs --test --test-force-exit t
 ```
 Expected: FAIL — B 的 `memory-view` 里没有该条目。
 
-- [ ] **Step 3: 修到通过**
+- [ ] **Step 5: 修到通过**
 
 按失败原因定位：事件没到 Hub → 查 Task 8 的发送；到了没分发 → 查 Task 10；分发了没落盘 → 查 Task 9 的 `writable` 与 room 映射。
 
-- [ ] **Step 4: 追加离群失效断言**
+- [ ] **Step 6: 追加离群失效断言**
 
 在同一个测试末尾追加：
 
 ```js
   // A member who left must stop receiving the group's memory changes.
-  const bobMembership = (await alice.wg.hub.workgroup(workgroupId)).members
-    .find(entry => entry.userId !== undefined && entry.role !== 'owner')
+  const roster = await alice.wg.hub.workgroup(workgroupId)
+  const bobMembership = roster.members.find(entry => entry.role !== 'owner' && entry.memberType === 'user')
   await alice.wg.bridge.leaveMember({ workgroupId, membershipId: bobMembership.membershipId })
-  const viewBefore = await bob.rt.memoryEndpoint('memory-view', { roomId: bobRoom.id })
-  assert.equal(viewBefore.error, null, 'the local view still opens; the ACL is enforced by membership')
-  // Alice writes again; Bob must not receive it.
   await alice.ctx.registeredTools.get('remember').execute(
     { text: 'A second entry that Bob must not receive.' },
     { agent: { id: session.id } },
@@ -1429,10 +1454,10 @@ Expected: FAIL — B 的 `memory-view` 里没有该条目。
     'a member who left receives no further memory changes')
 ```
 
-> `leaveMember` 的签名见 `bridge.js` 的同名方法；若成员行的字段名不同，以 `publicMember`
-> （`hub/src/workgroups/service.js:156` 附近）为准。
+> `leaveMember({ workgroupId, membershipId })` 的签名见 `bridge.js:800`；成员字段名见 Hub
+> `publicMember`（`service.js:147` 起）。
 
-- [ ] **Step 5: 跑全量**
+- [ ] **Step 7: 跑全量**
 
 Run:
 ```bash
@@ -1440,10 +1465,10 @@ cd ds-bot && npm test
 ```
 Expected: 全绿。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 8: 提交**
 
 ```bash
-git add ds-bot/test-realtime/workgroup-memory-sync.test.js
+git add ds-bot/test-realtime/helpers-pair.js ds-bot/test-realtime/workgroup-realtime.test.js   ds-bot/test-realtime/workgroup-memory-sync.test.js
 git commit -m "test(workgroup): prove group memory crosses machines through the original engine"
 ```
 

@@ -210,7 +210,8 @@
 | 成员 Session 创建 | `wg.sessionFor(room, member)`（`groups.js` 约 `:1373`） |
 | 工作群状态文件 | `workgroup/host/state.js`，`emptyState()` 与 `adopt` 白名单（`:68`） |
 | 测试夹具 | `ds-bot/test/workgroup-round.test.js` 的 `startRoundFixture()`（返回 `ctx/rt/wg/home/stop`） |
-| 跨机夹具 | `ds-bot/test-realtime/helpers-pair.js` 的 `invitedPair/until/roomOf`（`main` 已存在） |
+| 原版记忆测试夹具 | `ds-bot/test/memory.test.js` 的 `start()`；它不返回 runtime，Task 6 需把 `apply(ctx, …)` 换成 `createRuntime(ctx, …)` 并返回 `rt` |
+| 跨机夹具 | `main` 上 **没有** `helpers-pair.js`；`withHub/openMachine/until/invitedPair/roomOf/lineByText` 是 `workgroup-realtime.test.js` 的私有函数（`:56/:86/:157/:188/:220/:224`），G6R Task 12 先把它们抽成导出文件再复用 |
 | Hub 测试夹具 | `hub/test/ws-events.test.js` 的 `setup(t)`；`hub/test/g4-helpers.js` 的 `connect/groupWith` |
 
 ## 附录 C：开工前 checklist
