@@ -350,3 +350,37 @@ G4 未改动这些路径的产品行为，全部仍在通过；证据沿用 G3 �
 | 门禁 6：交互与原版对照 | **待人工** | 维护者按 `manual-checklist.md` 步骤 |
 | T20：Windows/macOS Electron 冷启动 | **待人工** | 需重装 `app/` 包文件后启动 |
 | `dev/bench.sh smoke` | 阻塞（沿用 G3） | 需 `../deepseek-harness` checkout |
+
+## G4/G5 修补轮（2026-10-25，按 `docs/superpowers/plans/2026-10-25-g4-g5-completion-repair.md`）
+
+本轮修复的是**已交付范围里仍会丢失/重复的行为**，不是新阶段。工作群仍是原版群聊的复制件，
+Hub 仍是唯一有序源；`src/host/` 仍是零改动。
+
+| 任务 | 自动证据 | 结论 |
+|---|---|---|
+| Task 1 远端槽位跨协调者重启仍为开放义务 | `workgroup-realtime.test.js`「a remote slot survives a coordinator restart as an open obligation」`+「a remote call writes its exchange to disk before it can reach the Hub」 | 通过（自动化） |
+| Task 2 恢复槽位由 Hub 答复继续，恰好一次、无 relay 副作用 | `workgroup-realtime.test.js`「a recovered waiting slot is continued by the matching Hub answer, once」；断言自动重连、1 行、`exchangeId`/`hubEventId`、slot posted、`deliverRemote === 0`、relay 执行 0 次 | 通过（自动化） |
+| Task 3 设置按 `configVersion` 比较并拒绝旧快照 | `hub/test/workgroup-settings.test.js` 3 项；`workgroup-realtime.test.js`「an older settings snapshot cannot overwrite a newer room」 | 通过（自动化） |
+| Task 4 已开始任务副作用只执行一次 | `workgroup-task.test.js`「starting the same approved task twice delivers it once」`+「a restart while RUNNING marks the task interrupted and never replays it」；Hub `task-approval.test.js`「a replayed RUNNING report is an idempotent acknowledgement」 | 通过（自动化） |
+| Task 5 Stop 跨重启仍生效 | `workgroup-realtime.test.js`「stopping a round while a remote call is out keeps it stopped」`+「a stopped round stays stopped after a coordinator restart」 | 通过（自动化） |
+| Task 6 全量测试确定性 | 连续 3 次 `test/feed.test.js` 5/5；`npm test` 1132 tests / 1131 pass / 0 fail / 1 skip / exit 0 | 通过（自动化） |
+
+### 本轮仍为人工（BLOCKED，不写 PASS）
+
+- G4-1：两台真机实时聊天、断网重连、附件哈希。
+- G4-5：冷启动侧栏目视。
+- G4-6：八项原版对照，每项截图。
+- G4-T20：`npm ci` + `npm run pack` 后重装、冷启动。
+- G5-T12：执行确实只发生在 B 的物理机器上。
+- G5-N3：审批卡视觉对照。
+- G5-T14：真实文件系统符号链接复现。
+
+### 本轮最终自动门禁
+
+| 命令 | 结果 |
+|---|---|
+| `cd hub && npm test` | **267 pass / 0 fail** |
+| `cd ds-bot && npm test` | **1132 tests，1131 pass / 0 fail / 1 skip**（全量两次均 exit 0） |
+| `cd ds-bot && node scripts/build-client.mjs --check` | exit 0 |
+| `cd ds-bot && npm run lint` | 0 error / 13 warning（与基线相同） |
+| `git diff --name-only ... -- ds-bot/src/host` | 空 |

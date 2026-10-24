@@ -16,7 +16,8 @@
 | G3 Hub 账号与设备 | 通过 | `hub-store`、`hub-client`、`hub-account-switch`、`hub-offline`；Hub 侧 123 测试 | 认证为手机号 + 密码，无 OTP |
 | G4 双机实时群聊与升级 | **自动部分通过（含 2 轮自查修复）** | `gates.md` 的门禁 2/3/4/5 + G4-A1..A19 + F1–F5 + G1–G3；hub 190 / ds-bot 990 | 门禁 1/6 与 T20 待人工；不发版 |
 | G5 跨用户委派与本人审批 | **自动部分通过（含补修轮）** | `g5/EVIDENCE-MATRIX.md`；hub 256 / ds-bot 1033 | 门禁 2 真机一半、N3 待人工 |
-| G4/G5 后补缺陷（lead 回填、发布包） | **已闭环（自动部分）** | `workgroup-membership.test.js` 18–22、`package-files.test.js`；ds-bot 1100 pass / 1 skip / 0 fail（串行），hub 263 pass | app 安装副本重装与重启待维护者执行 |
+| G4/G5 后补缺陷（lead 回填、发布包） | **已闭环（自动部分）** | `workgroup-membership.test.js` 18–22、`package-files.test.js`；ds-bot 1131 pass / 1 skip / 0 fail，hub 267 pass | app 安装副本重装与重启待维护者执行 |
+| G4/G5 修补轮（轮次持久化、对账、设置版本、任务幂等、Stop 持久、全量门禁） | **已闭环（自动部分）** | `docs/workgroup/gates.md` 的「G4/G5 修补轮」；人工项仍 BLOCKED | 不改阶段水位，不虚报人工结论 |
 | 人工验收 | 待执行 | `manual-checklist.md` | 由维护者执行 |
 | 发版 | 未执行 | `ds-bot` 源码 0.2.3；未发版 | 需求明确不发版 |
 
@@ -548,7 +549,7 @@ ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
 | 2026-10-25 | `workgroups.permission` 的 `null` 是**值**不是缺省 | 原版「各用各的」就是删掉 `room.permission`；Hub 永远返回该键，`null` 才可区分「这台机器上关掉了」与「你的 Hub 没有这个设置」 |
 | 2026-10-25 | 发布包加 `src/client/`，并用宿主 import 图自检 | host 的 `bridge.js` 实际 import `src/client/characters.js`；只改源码不改清单会让发布包工作群域加载失败、Hub 登录 404 |
 | 2026-10-25 | 本轮不动 `app/node_modules`、不重启应用 | 用户选择先交付源码；生效步骤与验收标志已记入缺口 27 |
-| 2026-10-25 | 面板刷新用 1.2 s 轮询，不上第二条推送通道 | 与原版 roster 轮询同形；一条 POST 路由是这两个域共用的边界 |
+| 2026-10-25 | 面板刷新改用既有 `/api/bot/feed` 推送；5 s 轮询只作断流兜底，不再新增浏览器传输 | 同一宿主已有一条 SSE；工作群保存发 `workgroup` 事件，重读仍走 `apiHandle`，Hub 仍是唯一数据源 |
 
 ## 下一步：G5
 
