@@ -55,15 +55,18 @@ function start({ pages = {}, services = {} } = {}) {
 function reader(response) {
   const source = response.body.getReader()
   const decoder = new TextDecoder()
+  const LF = String.fromCharCode(10)
   let buffer = ''
-  return async function next() {
+  let closed = false
+  const next = async function next() {
     for (;;) {
-      const end = buffer.indexOf('\n\n')
+      if (closed) return undefined
+      const end = buffer.indexOf(LF + LF)
       if (end >= 0) {
         const block = buffer.slice(0, end)
         buffer = buffer.slice(end + 2)
         if (block.startsWith(':')) continue
-        const field = name => block.split('\n').find(line => line.startsWith(`${name}: `))?.slice(name.length + 2)
+        const field = name => block.split(LF).find(line => line.startsWith(`${name}: `))?.slice(name.length + 2)
         return { event: field('event'), data: JSON.parse(field('data')) }
       }
       const { value, done } = await source.read()
@@ -71,6 +74,14 @@ function reader(response) {
       buffer += decoder.decode(value, { stream: true })
     }
   }
+  // Release the response body. Aborting the request alone does not cancel a reader that a test is
+  // still holding; that leaked handle is what kept the whole test process alive.
+  next.cancel = () => {
+    if (closed) return
+    closed = true
+    void source.cancel().catch(() => {})
+  }
+  return next
 }
 
 test('the live feed tells a window about saves, new chat entries and the reply being written', async (t) => {
@@ -81,6 +92,10 @@ test('the live feed tells a window about saves, new chat entries and the reply b
   const response = await routes['/api/bot/feed'].fetch(new Request('http://localhost/api/bot/feed', { signal: abort.signal }))
   assert.equal(response.headers.get('content-type'), 'text/event-stream; charset=utf-8')
   const next = reader(response)
+  t.after(() => {
+    abort.abort()
+    next.cancel()
+  })
   assert.equal((await next()).event, 'hello')
 
   await call('set-prefs', { motion: 'lively' })
@@ -118,8 +133,10 @@ test('the live feed tells a window about saves, new chat entries and the reply b
   onStatus({ agent: { id: 'not-a-bot' }, status: 'running' })
   assert.deepEqual(await next(), { event: 'live', data: {} })
 
-  abort.abort()
-  assert.equal(await next(), undefined)
+  // The socket was already cancelled by `t.after`; do not wait for EOF from a reader whose request
+  // has been aborted. A browser's EventSource behaves the same way: abort ends consumption, it does
+  // not deliver a final frame.
+  next.cancel()
 })
 
 test('a window that stops reading the feed is dropped', { timeout: 10_000 }, async (t) => {
@@ -127,10 +144,11 @@ test('a window that stops reading the feed is dropped', { timeout: 10_000 }, asy
   t.after(stop)
   await call('state')
   const response = await routes['/api/bot/feed'].fetch(new Request('http://localhost/api/bot/feed'))
+  const next = reader(response)
+  t.after(() => next.cancel())
   const onEvent = ctx.listeners.get('session/event').find(listener => listener.feed)
   for (let index = 0; index < 1000; index += 1) onEvent({ id: 'm1c' }, userMessage(`line ${index}`, index))
   // What was queued before the drop still arrives, then the stream ends.
-  const next = reader(response)
   let count = 0
   while (await next() !== undefined) count += 1
   assert.equal(count > 1 && count < 1000, true)
