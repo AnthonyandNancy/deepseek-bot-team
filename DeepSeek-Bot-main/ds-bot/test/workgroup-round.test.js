@@ -191,14 +191,23 @@ test('@all calls every member, one at a time', async (t) => {
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '@all 大家好')
   // A round is serial by design (the original's rule: one member speaks at a time), so
-  // the second member is only called after the first has answered.
-  await new Promise(resolve => setTimeout(resolve, 40))
-  const first = wg.workgroupOf(room.id).sessions['bot-a']
+  // the second member is only called after the first has answered. Wait with timers (which let
+  // the round's own continuations run) rather than a single fixed sleep that a loaded parallel
+  // suite can outrun.
+  const waitForSession = async (memberId) => {
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const found = wg.workgroupOf(room.id).sessions[memberId]
+      if (found !== undefined) return found
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    return undefined
+  }
+  const first = await waitForSession('bot-a')
   assert.ok(first !== undefined, 'the admin was called first')
   assert.equal(wg.workgroupOf(room.id).sessions['bot-b'], undefined, 'the others wait their turn')
   await answer(first, '收到')
-  await new Promise(resolve => setTimeout(resolve, 40))
-  const second = wg.workgroupOf(room.id).sessions['bot-b']
+  const second = await waitForSession('bot-b')
   assert.ok(second !== undefined, 'then the other member is called')
   await answer(second, '也收到')
   const result = JSON.parse(await running)
