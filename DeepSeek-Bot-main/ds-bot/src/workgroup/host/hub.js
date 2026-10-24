@@ -423,10 +423,13 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
     // The two settings the Hub stores. Sending them is what makes a rename stick on the other
     // person's machine: without it the local record changed, the Hub kept the old value, and the
     // next roster read put it back.
-    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId }) {
+    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId, configVersion }) {
       const token = await ensureAccess()
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/settings`, {
         body: {
+          // The version this change was based on. A Hub that knows the field refuses a stale write;
+          // an older Hub ignores it because it is not in its closed allow-list.
+          ...(configVersion === undefined ? {} : { configVersion }),
           ...(name === undefined ? {} : { name }),
           ...(notice === undefined ? {} : { notice }),
           ...(replyMode === undefined ? {} : { replyMode }),

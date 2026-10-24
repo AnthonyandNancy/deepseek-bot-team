@@ -912,3 +912,41 @@ test('a remote slot survives a coordinator restart as an open obligation', async
   // the test ends promptly without depending on the product's reply timeout.
   await Promise.race([running.catch(() => {}), new Promise(resolve => setTimeout(resolve, 100))])
 })
+
+// 10. SETTINGS ARE COMPARED BY VERSION, NOT LAST-WRITE-WINS.
+//
+// The Hub refuses a write based on an old version, and the plugin refuses an old response. The Hub
+// side is driven from Alice (the owner, the only account with write permission in this fixture); the
+// local side then applies an older snapshot directly to Alice's room and proves it is ignored.
+test('an older settings snapshot cannot overwrite a newer room', async (t) => {
+  const { alice, workgroupId } = await invitedPair(t)
+  const room = roomOf(alice, workgroupId)
+  await alice.wg.syncRoster({ hubWorkgroupId: workgroupId })
+  await until(() => Number.isFinite(room.hubConfigVersion), { label: 'the room to learn the config version' })
+  const v1 = room.hubConfigVersion
+
+  const first = await alice.call('update-room', { id: room.id, name: '版本一' })
+  assert.equal(first.ok, true, JSON.stringify(first.error))
+  const afterFirst = await alice.wg.hub.workgroup(workgroupId)
+  assert.ok(afterFirst.configVersion > v1, 'the accepted write advances the Hub version')
+  assert.equal(room.hubConfigVersion, afterFirst.configVersion, 'and the room follows it')
+  const stale = await alice.wg.bridge.updateGroupSettings({ workgroupId, name: '旧版本覆盖', configVersion: v1 })
+    .then(() => undefined)
+    .catch(error => error)
+  assert.equal(stale?.code ?? stale?.status, 'workgroup/settings-stale', `stale=${JSON.stringify(stale)}`)
+  const stored = await alice.wg.hub.workgroup(workgroupId)
+  assert.equal(stored.name, '版本一', 'the stale write never changed the Hub')
+
+  const before = { name: room.name, version: room.hubConfigVersion }
+  await alice.wg.applyRoster({
+    hubWorkgroupId: workgroupId,
+    members: room.members.map(member => ({ ...member, membershipId: member.membershipId ?? member.id })),
+    replyMode: room.mode,
+    leadMembershipId: undefined,
+    name: '服务器旧快照',
+    notice: room.notice,
+    configVersion: before.version - 1,
+  })
+  assert.equal(room.name, before.name, 'an older response is ignored')
+  assert.equal(room.hubConfigVersion, before.version, 'and cannot move the version backwards')
+})

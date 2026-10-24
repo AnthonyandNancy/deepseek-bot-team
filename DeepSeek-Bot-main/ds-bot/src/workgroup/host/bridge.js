@@ -783,8 +783,8 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       return wg.hub.leaveMember({ workgroupId, membershipId })
     },
     // A group's name and notice, changed for everyone (`groups.js` calls this after a rename).
-    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId }) {
-      return wg.hub.updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId })
+    async updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId, configVersion }) {
+      return wg.hub.updateGroupSettings({ workgroupId, name, notice, replyMode, permission, leadMembershipId, configVersion })
     },
     async answerInvite({ inviteId, accept }) {
       const answer = await wg.hub.answerInvite({ inviteId, accept })

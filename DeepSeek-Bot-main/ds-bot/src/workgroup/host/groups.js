@@ -488,14 +488,23 @@ export function install(wg) {
   //
   // `adminId` follows the Hub's owner, so a group renamed on one machine and an admin-only round on
   // another agree about who leads.
-  async function applyRoster({ hubWorkgroupId, members: hubMembers, replyMode, permission, leadMembershipId, name, notice }) {
+  async function applyRoster({ hubWorkgroupId, members: hubMembers, replyMode, permission, leadMembershipId, name, notice, configVersion }) {
     if (hubWorkgroupId === undefined) return undefined
     await wg.load()
     const room = roomOfHubGroup(hubWorkgroupId)
     if (room === undefined) return undefined
     const roster = Array.isArray(hubMembers) ? hubMembers : undefined
     if (roster === undefined) return room
-    let changedByRoster = false
+    // COMPARE AND APPLY. Two machines may read the group and save settings at almost the same time;
+    // the slower response must not overwrite the newer room. The Hub's version is monotonic, so an
+    // answer older than what this room already applied is ignored. An answer with the same version is
+    // still applied: the first response for that version may have been a roster-only read.
+    if (Number.isFinite(configVersion) && Number.isFinite(room.hubConfigVersion) && configVersion < room.hubConfigVersion) {
+      return room
+    }
+    const versionChanged = Number.isFinite(configVersion) && room.hubConfigVersion !== configVersion
+    if (Number.isFinite(configVersion)) room.hubConfigVersion = configVersion
+    let changedByRoster = versionChanged
     // THE HUB OWNS THE GROUP'S NAME AND NOTICE, TOO.
     //
     // `syncRoster` reads the whole group (`GET /v1/workgroups/:id`) but used to pass only the
@@ -810,6 +819,9 @@ export function install(wg) {
       // a Hub settings notification re-read the roster but left the open room's title/notice stale.
       name: answer.name,
       notice: answer.notice,
+      // The version that answer was read at. `applyRoster` refuses to let an older answer overwrite
+      // a newer room, and every settings write sends this version back as its compare token.
+      configVersion: answer.configVersion,
     })
   }
   wg.syncRoster = syncRoster
@@ -1175,6 +1187,9 @@ export function install(wg) {
       const pushed = await Promise.resolve()
         .then(() => wg.bridge.updateGroupSettings({
           workgroupId: room.hubWorkgroupId,
+          // Compare-and-apply: the Hub refuses this if the group moved since the local room last
+          // read it. The caller then re-reads rather than overwriting a newer value.
+          ...(room.hubConfigVersion === undefined ? {} : { configVersion: room.hubConfigVersion }),
           ...(room.name !== before.name ? { name: room.name } : {}),
           ...(patch.notice !== undefined ? { notice: room.notice ?? '' } : {}),
           ...(modeChanged ? { replyMode: room.mode } : {}),
@@ -1192,7 +1207,13 @@ export function install(wg) {
               }
             : {}),
         }))
-        .then(() => undefined)
+        .then((answer) => {
+          // The write names the version it produced. Advancing the local fence now lets several
+          // edits in a row work without waiting for a roster notification between each one.
+          const version = answer?.workgroup?.configVersion ?? answer?.configVersion
+          if (Number.isFinite(version)) room.hubConfigVersion = version
+          return undefined
+        })
         .catch(error => error)
       // Reported, never silently swallowed. The local change is already saved and the next roster
       // read adopts the Hub's value, so a failure here means the change will REVERT — the settings

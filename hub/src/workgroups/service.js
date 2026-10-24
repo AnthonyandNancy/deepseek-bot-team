@@ -78,7 +78,7 @@ export const CREATE_FIELDS = new Set(['name', 'notice', 'avatar', 'upgradeId', '
 // `CREATE_FIELDS` is one: an unfamiliar field is a client bug worth naming now, not a value that
 // silently never travels. `avatar` and `upgradeId` are absent — the first is not exposed by any
 // client yet, and the second is the idempotency key of a create, not a setting.
-export const SETTINGS_FIELDS = new Set(['name', 'notice', 'replyMode', 'permission', 'leadMembershipId'])
+export const SETTINGS_FIELDS = new Set(['name', 'notice', 'replyMode', 'permission', 'leadMembershipId', 'configVersion'])
 
 // Who answers a plain message in the group. The original has exactly these two
 // (`src/host/roster.js` `buildRoom`: `mode: 'admin'`), and a workgroup must not invent a third:
@@ -177,6 +177,9 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
   const publicGroup = (row) => ({
     workgroupId: row.id,
     ownerUserId: row.owner_user_id,
+    // The compare-and-apply token for settings. It changes on every accepted write, so a client
+    // can refuse to overwrite a newer value it has not seen.
+    configVersion: row.config_version,
     name: row.name,
     notice: row.notice,
     // `replyMode` is who answers a plain message: the admin alone (`admin`, the original's default)
@@ -543,6 +546,16 @@ export function createWorkgroupService({ db, audit, now = () => Date.now(), even
       const { group, membership } = requireMember(workgroupId, userId)
       if (membership.role !== 'owner' && membership.role !== 'admin') {
         throw forbidden('workgroup/not-admin', 'Only the group owner or an admin may change its settings.')
+      }
+      // A caller that read a version may only write on top of that exact version. The check runs
+      // BEFORE any field validation: a stale request must not learn whether its other values were
+      // acceptable, and it must not partially apply.
+      if (body?.configVersion !== undefined) {
+        const version = Number(body.configVersion)
+        if (!Number.isInteger(version) || version !== group.config_version) {
+          throw conflict('workgroup/settings-stale',
+            `This group's settings changed (version ${group.config_version}); re-read and try again.`)
+        }
       }
       for (const key of Object.keys(body ?? {})) {
         if (!SETTINGS_FIELDS.has(key)) {
