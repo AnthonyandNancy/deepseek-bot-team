@@ -465,7 +465,7 @@ export function install(rt) {
   const scopeKey = scope => (scope.kind === 'team' ? 'team' : scope.kind === 'group' ? `group:${scope.roomId}` : `bot:${scope.botId}`)
   // The group a Session speaks in, an earlier part of it included: none for a Bot's
   // own chat. Writes check membership again, so a member that has left writes nothing.
-  const roomIdOf = sessionId => rt.groupOwners.get(sessionId)?.roomId ?? rt.pastOwners.get(sessionId)?.roomId
+  const roomIdOf = sessionId => rt.groupOwners.get(sessionId)?.roomId ?? rt.pastOwners.get(sessionId)?.roomId ?? rt.memoryRoomOf?.(sessionId)
   // A room by id, whichever domain owns it. The original index answers for a local group;
   // a workgroup is answered by its own domain through the one read-only seam, so the
   // memory panel, its write checks and its keeper checks work on both kinds of group.
@@ -1473,7 +1473,7 @@ export function install(rt) {
     // A turn that starts again before the delay is over is reviewed when it ends.
     ctx.on('agent/status', ({ agent, status }) => {
       const id = agent?.id
-      if (id === undefined || (!rt.isBotSession(id) && !turnOwners.has(id))) return
+      if (id === undefined || (!rt.isBotSession(id) && !rt.memoryRoomOf?.(id) && !turnOwners.has(id))) return
       clearTimeout(reviewTimers.get(id))
       reviewTimers.delete(id)
       if (status !== 'idle') {
