@@ -50,6 +50,12 @@ test('the five memory endpoints use the same workgroup API as the panel', async 
   assert.equal(corrected.ok, true, JSON.stringify(corrected.error))
   assert.equal(corrected.value.memory.version, 2)
 
+  const missingCorrectionVersion = await alice.call('memory-correct', {
+    workgroupId, memoryId, content: 'no version sent',
+  })
+  assert.equal(missingCorrectionVersion.ok, false)
+  assert.equal(missingCorrectionVersion.error.code, 'memory/version-required')
+
   const stale = await alice.call('memory-correct', {
     workgroupId, memoryId, content: 'stale overwrite', expectedVersion: 1,
   })

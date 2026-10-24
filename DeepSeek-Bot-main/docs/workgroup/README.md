@@ -1,7 +1,7 @@
 # 工作群（BotCode 迁移）实施文档
 
 - 日期：2026-10-22（2026-10-26 更新）
-- 水位：**G6 待开工**。G4/G5 自动门禁已并入 `main`（`e71119b`）；G4-1/5/6、G4-T20、G5-T12/N3/T14 仍待人工。G6 计划见 `docs/superpowers/plans/2026-10-26-g6-group-memory.md`，续接指令见 `g6/NEXT-INSTRUCTION.md`
+- 水位：**G6 自动部分完成；人工项 BLOCKED**。G4/G5 自动门禁已并入 `main`（`e71119b`）；G6 群记忆实现与自动门禁在 `feat/g6-group-memory`。G4-1/5/6、G4-T20、G5-T12/N3/T14、G6-M1 仍待人工。计划见 `docs/superpowers/plans/2026-10-26-g6-group-memory.md`，证据见 `g6/EVIDENCE-MATRIX.md`。
 - 需求：`../plans/2026-10-22-workgroup-migration.md`
 - 计划：`../plans/2026-10-22-workgroup-migration-implementation-plan.md`
 - 技术方案（源基线原文）：`BotCode/Workgroup_AI_技术实施方案_2026-10-21.md.md`（换算规则见 `CONVERSION.md`）
@@ -23,7 +23,7 @@
 |---|---|
 | `diff-manifest.md` | 新增/修改/未修改文件清单与核对方法 |
 | `parity-audit.md` | 工作群与原版群聊的复制完整性、逐能力对照、记忆缺口与修复 |
-| `gates.md` | G0–G3 可自动化门禁的结论与证据位置 |
+| `gates.md` | G0–G6 可自动化门禁的结论与证据位置 |
 | `manual-checklist.md` | 人工验收步骤与判据 |
 | `progress-and-gaps.md` | 进度台账、已知缺口、决定记录 |
 | `g4-entry.md` | G4 目标、依赖、必读、阻塞 |
@@ -31,6 +31,9 @@
 | `g4/ROUND-LOG.md` | G4 每轮记录（中断/换人后接续用） |
 | `CONVERSION.md` | G0–G3 阶段文档的转换规则、证据口径、与手写文档的关系 |
 | `g6/NEXT-INSTRUCTION.md` | **G6 续接指令**：群记忆、恢复、完整验收 |
+| `g6/EVIDENCE-MATRIX.md` | G6 门禁与 T18 的测试/断言证据 |
+| `g6/ROUND-LOG.md` | G6 轮次、计划偏差与门禁结果 |
+| `g6/DESIGN-GROUP-MEMORY.md` | Hub 权威、ACL、版本、软删除、投影与回顾接缝 |
 | `g0/`…`g5/` | 各阶段记录与证据（历史口径） |
 | `DEV-CHECKLIST.md`、`KNOWN-GAPS.md` | 源仓库顶层清单的转换版（历史参考） |
 

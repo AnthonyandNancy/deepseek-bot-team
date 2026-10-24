@@ -369,7 +369,7 @@ unreachable: true }))`）。表单能显示，但点"Sign in"必然失败。这�
 **仓库**：`D:\code\ai\DeepSeek-Bot\BotCode`，`main`，HEAD `d01f32a`。
 版本：`ds-bot` 0.2.3；`hub` package.json 写的是 0.0.0。
 
-**当前未提交改动**（用户自己的，别乱动；2026-10-25 本轮又新增了下列 2 个文件）：
+**历史记录（2026-10-25；已提交，见提交范围 `22c2767..e71119b`）**。下面这段描述的是当时的未提交改动，不再代表当前工作区；G6 工作另见 `g6/ROUND-LOG.md`。
 
 ```
 M DeepSeek-Bot-main/app/engine/package.json

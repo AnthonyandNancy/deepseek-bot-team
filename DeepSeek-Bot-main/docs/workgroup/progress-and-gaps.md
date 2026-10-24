@@ -2,9 +2,9 @@
 # 进度台账与缺口登记
 
 - 日期：2026-10-22
-- 水位：**G5 完成**（方案 §14 的 5 条门禁有自动化证据；新增 N1/N2 通过；N3 与门禁 2 的真机一半待人工），未发版
+- 水位：**G6 自动部分完成**（群记忆、ACL、恢复与 T18 有自动化证据；G4-1/5/6、G4-T20、G5-T12/N3/T14、G6-M1 仍待人工），未发版
 - 2026-10-23 补：**群内 Bot 交接**（方案 §5.1 的 `host/handoffs.js` 复制件）此前缺失，现已补上；属 G1 复制缺口，非 G5 范围
-- 2026-10-25 补：**旧群 lead 回填 + 发布包漏文件** 已闭环，属 G4/G5 已交付范围的缺陷，**不新开阶段**；整体水位仍为 G5 自动部分完成，下一步 G6
+- 2026-10-25 补：**旧群 lead 回填 + 发布包漏文件** 已闭环，属 G4/G5 已交付范围的缺陷，**不新开阶段**；当时的下一步是 G6，G6 现见 `g6/ROUND-LOG.md`
 
 ## 进度台账
 
@@ -18,7 +18,8 @@
 | G5 跨用户委派与本人审批 | **自动部分通过（含补修轮）** | `g5/EVIDENCE-MATRIX.md`；hub 256 / ds-bot 1033 | 门禁 2 真机一半、N3 待人工 |
 | G4/G5 后补缺陷（lead 回填、发布包） | **已闭环（自动部分）** | `workgroup-membership.test.js` 18–22、`package-files.test.js`；ds-bot 1131 pass / 1 skip / 0 fail，hub 268 pass | app 安装副本重装与重启待维护者执行 |
 | G4/G5 修补轮（轮次持久化、对账、设置版本、任务幂等、Stop 持久、全量门禁） | **已闭环（自动部分）** | `docs/workgroup/gates.md` 的「G4/G5 修补轮」；人工项仍 BLOCKED | 不改阶段水位，不虚报人工结论 |
-| 人工验收 | 待执行 | `manual-checklist.md` | 由维护者执行 |
+| G6 群记忆 | **自动部分通过** | `g6/EVIDENCE-MATRIX.md`；Hub 283 / ds-bot 1224（1223 pass / 1 skip） | G6-M1 待人工；OS 钥匙串仍 BLOCKED |
+| 人工验收 | 待执行 | `manual-checklist.md` | 由维护者执行；G6-M1 已加入 |
 | 发版 | 未执行 | `ds-bot` 源码 0.2.3；未发版 | 需求明确不发版 |
 
 ## G4 做到什么
@@ -238,7 +239,7 @@ B 机回答 → postInRound → mirrorLine → Hub → A 机 receiveRemote → �
 **1. 消息不实时更新（两个独立原因，都在显示侧）**
 
 - 面板读一次就再也不读：`openWorkgroup` 调 `callWorkgroup('room')` 后就没人再读，Hub 的新行写进了
-  `state.json`，屏幕上没有。修法：新增 `useLiveRoom(roomId)`，在 `ChatPane` 挂载期间每 1.2 s 重读一次，
+  `state.json`，屏幕上没有。修法：新增 `useLiveRoom(roomId)`，由既有的 `/api/bot/feed` push 触发重读，保留 5 s 兜底轮询（历史实现曾每 1.2 s 轮询）。
   **只在 `roomSignature` 真的变了才写 store**（否则每 tick 重建一次 transcript），离开群即停。
 - 别家 Bot 的发言从不进群 Session：`receiveRemote` 有一条正确规则「Hub 来的行不写群 Session」，因为它
   会触发第二次回合。但这条规则同时把同事 Bot 的话挡在了用户阅读的那个聊天面之外。修法：按**角色**拆开而不
@@ -482,7 +483,7 @@ ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
 | 23 | 群内「谁正在看」未画（Hub 名册有 `online`，UI 未用） | 微信式群聊会显示，但需要一条成员级订阅而非每次拉名册 | 待定 | 第 5 项跟进时 |
 | 24 | 动效只在「本机在跑」时可见；别的机器上的成员干活，本机看不到 | `roomWorkView` 是**本进程**的 `live` 表，跨机活动态要新的事件类型（`presence.working`） | 待定 | 第 6 项跟进时 |
 | 25 | ~~管理员每台机器自己算~~ **已解决（v7）**：`workgroups.lead_membership_id`，由群主机器建群或改设置时指定；**老群由群主机器在 `syncRoster` 幂等回填**，各机器读同一个答案 | — | — | 已闭环（含老群回填） |
-| 26 | **成员列表每 1.2 s 一次 HTTP 轮询**，不是推送 | 客户端与宿主之间只有一条 POST 路由（`api.js`），原版团队自己的 roster 也是 1.5 s 轮询；加流式要新传输通道 | 本轮决定 | 轮询成为瓶颈时（大群、多标签页） |
+| 26 | 成员列表由 feed push 触发重读，5 s 兜底轮询 | 复用既有 `/api/bot/feed`；不新造浏览器传输 | G4 后续实现 | 若兜底轮询成为瓶颈再评估 |
 | 27 | **app 安装副本仍缺 `src/client/`**：源码与发布清单已修，但 `app/node_modules/ds-bot` 未重装，正在跑的应用仍会工作群域加载失败→登录 404 | 用户选择本轮不动 app 依赖、不重启 | 用户，2026-10-25 | 下次启动应用前，在 `app/` 重装并重启 |
 
 ## 第 4 轮自查修复（2026-10-22）
