@@ -509,3 +509,14 @@ test('subscribing narrows the fan-out to the named groups', async (t) => {
   assert.equal(b.all('event').filter(message => message.workgroupId === second.body.workgroupId).length, 0,
     'an unsubscribed group must not be pushed')
 })
+
+test('the four memory events are accepted by the closed set but never counted as readable', async () => {
+  const { EVENT_TYPES, READABLE_EVENT_TYPE } = await import('../src/workgroups/service.js')
+  for (const type of ['memory.proposed', 'memory.created', 'memory.corrected', 'memory.deleted']) {
+    assert.equal(EVENT_TYPES.has(type), true, `${type} must be in the closed event set`)
+    assert.notEqual(type, READABLE_EVENT_TYPE)
+  }
+  // Only a chat message is unread. This is the exact query `workgroups.get` counts, so a future
+  // memory type that accidentally became readable would make the badge climb without a message.
+  assert.equal(READABLE_EVENT_TYPE, 'chat.message')
+})
