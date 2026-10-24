@@ -39,7 +39,7 @@
 | 命令 | 当前结果 |
 |---|---|
 | `cd hub && npm test` | 283 tests / 283 pass / 0 fail |
-| `cd ds-bot && npm test` | 1224 tests / 1223 pass / 1 skip / 0 fail / exit 0 |
+| `cd ds-bot && npm test` | 1225 tests / 1224 pass / 1 skip / 0 fail / exit 0 |
 | `node scripts/build-client.mjs --check` | exit 0 |
 | `npm run lint` | 0 error / 13 warning |
 | `git diff --name-only e71119b -- ds-bot/src/host` | 仅 `memory.js`（允许的回顾接缝）；`groups/turns/delivery/resume/constants.js` 空 |

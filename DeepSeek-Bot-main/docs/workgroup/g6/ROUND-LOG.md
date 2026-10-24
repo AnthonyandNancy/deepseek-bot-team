@@ -48,7 +48,7 @@
 | 6 | `rt.memoryRoomOf` 与回顾门 | `c7e9a10` | `workgroup-memory-review.test.js`、memory 102/102 |
 | 7 | 删除工作群归档本地记忆 | `93ec26f` | `workgroup-memory-review.test.js` |
 | 8 | 设置记忆区、feed 重读、i18n、构建 | `85e508c` | `workgroup-ux.test.js`、panel 4/4、build check |
-| 9 | T18 负例、离群、删除、重启、幂等、跨机修正/删除、隔离 | `ab08b52`、`307982d` | Hub 283/283；ds-bot 1224 tests / 1223 pass / 1 skip / 0 fail |
+| 9 | T18 负例、离群、删除、重启、幂等、跨机修正/删除、隔离 | `ab08b52`、`307982d` | Hub 283/283；ds-bot 1225 tests / 1224 pass / 1 skip / 0 fail |
 | 10 | 文档与证据 | 本文档所在提交 | `EVIDENCE-MATRIX.md` |
 
 ## 3. 门禁结果
@@ -56,7 +56,7 @@
 | 命令 | 结果 |
 |---|---|
 | `cd hub && npm test` | 283 tests / 283 pass / 0 fail |
-| `cd ds-bot && npm test` | 1224 tests / 1223 pass / 1 skip / 0 fail / exit 0 |
+| `cd ds-bot && npm test` | 1225 tests / 1224 pass / 1 skip / 0 fail / exit 0 |
 | `node scripts/build-client.mjs --check` | exit 0 |
 | `npm run lint` | 0 error / 13 warning |
 | `git diff --name-only e71119b -- ds-bot/src/host` | 仅 `memory.js`（用户允许的回顾接缝）；五个冻结文件无改动 |
