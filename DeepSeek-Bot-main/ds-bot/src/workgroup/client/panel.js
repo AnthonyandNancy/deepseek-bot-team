@@ -17,7 +17,7 @@ import { createElement as h, useCallback, useEffect, useMemo, useRef, useState }
 import { callWorkgroup } from './api.js'
 import { ApprovalCards } from './tasks.js'
 import { createSource } from '../../client/sources.js'
-import { RoomAvatar } from '../../client/mark.js'
+import { BotMark, RoomAvatar } from '../../client/mark.js'
 import { Elapsed, Shimmer, workPhrase } from '../../client/cells.js'
 import { t } from '../../client/i18n.js'
 import { mentionSpans } from '../../shared/mentions.js'
@@ -76,20 +76,37 @@ export async function openWorkgroup(id) {
 
 // KEEP THE OPEN GROUP LIVE.
 //
-// `openWorkgroup` reads the room once, and nothing read it again. So a line that arrived while the
-// group was on screen — the colleague's Bot answering, a member joining, a rename made on another
-// machine — was written to disk by the host and never reached the screen until the group was closed
-// and reopened. That is the reported 「邀请同事加入后，消息并没有实时更新」.
+// The host already has one Server-Sent Events stream for the original team (`/api/bot/feed`,
+// `src/host/feed.js`). A workgroup save publishes a `workgroup` event on it. The panel subscribes to
+// that same stream, so a line, a roster change or a rename arrives as it happens instead of on a
+// timer. The event is only a SIGNAL: the room and the Hub roster are re-read through their normal
+// read endpoints, so one transport does not become a second source of truth.
 //
-// Polling, not push, and deliberately: this client talks to the host over one POST route with no
-// stream (`api.js`), which is the same shape the original team's own client uses — its roster poll
-// runs every 1.5 s (`src/client/index.js`). A second transport for the workgroup alone would be a
-// second thing to keep working.
-//
-// It polls only while a group is open, and stops when it closes, so a closed panel costs nothing.
-// A read that finds nothing new does not touch the store: `roomSignature` is compared first, and a
-// set() with an equal snapshot is what would otherwise re-render the transcript several times a
-// second.
+// A slow poll remains as the recovery path for a dropped stream. A laptop that sleeps can lose the
+// EventSource without the room becoming wrong; the fallback closes that gap.
+const FEED_PATH = 'api/bot/feed'
+const liveListeners = new Set()
+let liveSource
+const listenLive = (fn) => {
+  liveListeners.add(fn)
+  if (liveSource === undefined && typeof EventSource === 'function') {
+    liveSource = new EventSource(FEED_PATH)
+    const notify = (payload) => { for (const listener of liveListeners) listener(payload ?? {}) }
+    liveSource.addEventListener('workgroup', (event) => {
+      let payload = {}
+      try { payload = JSON.parse(event.data) } catch { /* a malformed frame is just a refresh */ }
+      notify(payload)
+    })
+    liveSource.addEventListener('revision', () => notify({ kind: 'revision' }))
+  }
+  return () => {
+    liveListeners.delete(fn)
+    if (liveListeners.size > 0) return
+    liveSource?.close?.()
+    liveSource = undefined
+  }
+}
+
 const roomSignature = room => JSON.stringify([
   room?.name,
   room?.notice,
@@ -107,9 +124,10 @@ export function useLiveRoom(roomId) {
     let live = true
     let timer
     let running = false
+    let pending = false
     let last = roomSignature(store.getSnapshot().room)
-    const poll = async () => {
-      if (running) return
+    const read = async () => {
+      if (running) { pending = true; return }
       running = true
       try {
         const room = await callWorkgroup('room', { id: roomId })
@@ -122,16 +140,79 @@ export function useLiveRoom(roomId) {
           setState({ room })
         }
       } catch {
-        // A failed read is not an error to show: the group is already on screen, and the next tick
-        // tries again. The connection line reports the host being down.
+        // The group is already on screen; the next signal or fallback tick tries again.
       } finally {
         running = false
-        if (live) timer = setTimeout(poll, 1200)
+        if (pending) { pending = false; void read() }
       }
     }
-    void poll()
-    return () => { live = false; clearTimeout(timer) }
+    // Every workgroup signal refreshes the open room. The event may name another group; `read` uses
+    // the selected id and the store check above, so it cannot show one room's answer in another.
+    const off = listenLive(() => { void read() })
+    const tick = () => {
+      if (!live) return
+      void read().finally(() => { if (live) timer = setTimeout(tick, 5000) })
+    }
+    void read()
+    timer = setTimeout(tick, 5000)
+    return () => { live = false; clearTimeout(timer); off() }
   }, [roomId])
+}
+
+// The member card's own live read. The room log changes only when somebody speaks; a person joining,
+// or a colleague's Bot being added, changes the roster without a line. The Hub remains the authority,
+// and a workgroup signal is the trigger; the signature keeps a message-only signal from re-rendering.
+const memberSignature = members => JSON.stringify((members ?? []).map(member => [
+  member.membershipId,
+  member.name,
+  member.role,
+  member.ownerIsYou,
+  member.avatar,
+  member.color,
+  member.online,
+]))
+
+export function useLiveMembers(workgroupId) {
+  const [members, setMembers] = useState([])
+  useEffect(() => {
+    if (workgroupId === undefined) { setMembers([]); return undefined }
+    let live = true
+    let timer
+    let running = false
+    let pending = false
+    let last = memberSignature(members)
+    const read = async () => {
+      if (running) { pending = true; return }
+      running = true
+      try {
+        // The roster lives on the Hub, so this read is the authority. It is deliberately NOT gated
+        // on the local state revision: presence (`online`) and a member joining change the Hub row
+        // without necessarily saving this machine's state file.
+        const answer = await callWorkgroup('group-members', { workgroupId })
+        if (!live) return
+        const next = answer?.members ?? []
+        const signature = memberSignature(next)
+        if (signature !== last) {
+          last = signature
+          setMembers(next)
+        }
+      } catch {
+        // A Hub that is down keeps the last roster on screen; the connection line says why.
+      } finally {
+        running = false
+        if (pending) { pending = false; void read() }
+      }
+    }
+    const off = listenLive(() => { void read() })
+    const tick = () => {
+      if (!live) return
+      void read().finally(() => { if (live) timer = setTimeout(tick, 5000) })
+    }
+    void read()
+    timer = setTimeout(tick, 5000)
+    return () => { live = false; clearTimeout(timer); off() }
+  }, [workgroupId])
+  return members
 }
 
 // Create a workgroup directly, then select it. Returns the created room so the caller
@@ -486,7 +567,7 @@ export function LocalWorking({ roomId }) {
 // The members of a Hub group, as the Hub reports them, plus the invite control. A person is shown
 // as a masked phone number (the Hub never returns a full one to a member), and a Bot endpoint as
 // the name its owner published.
-function MemberList({ hub, members, onInvite }) {
+export function MemberList({ hub, members, onInvite }) {
   const [phone, setPhone] = useState('')
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState(null)
@@ -550,7 +631,30 @@ function MemberList({ hub, members, onInvite }) {
       // whose — the user's 「需要在每个 bot 增加标识，区分每个 bot 的归属」. "Yours" is the Hub's own
       // answer (`ownerIsYou`, computed from the authenticated connection), so it cannot be faked.
       member.memberType === 'botEndpoint'
-        ? h(RoomAvatar, { room: { members: [member.endpointId] }, size: 16 })
+        // The Hub roster carries the appearance its owner published (`avatar.shape`/`image`,
+        // plus `color`). Passing the bare endpoint id instead let `lookOf()` derive a different
+        // character and colour on every machine, which is the reported changing Bot avatar.
+        ? h(BotMark, {
+          bot: {
+            id: member.endpointId,
+            name: member.name,
+            // `lookOf()` reads the colour from the record and the shape/photo from `avatar`.
+            // The Hub's published snapshot groups all three; split it the same way here.
+            ...(member.color !== undefined
+              ? { color: member.color }
+              : typeof member.avatar?.color === 'string' ? { color: member.avatar.color } : {}),
+            ...(member.avatar === undefined
+              ? {}
+              : {
+                  avatar: {
+                    ...(typeof member.avatar.shape === 'string' ? { shape: member.avatar.shape } : {}),
+                    ...(typeof member.avatar.image === 'string' ? { image: member.avatar.image } : {}),
+                  },
+                }),
+          },
+          size: 16,
+          live: false,
+        })
         : null,
       h('span', { className: 'bt-wg-roster-name' },
         // A Bot endpoint shows its published name; a person shows the masked number the Hub gives.
@@ -589,24 +693,29 @@ function ChatPane({ roomId, roster }) {
   const room = state.room
   // The Hub roster is fetched separately from the room, because it lives on the Hub and the room
   // lives here: a Hub that is down must not stop the conversation that is already on screen.
-  const [members, setMembers] = useState([])
   const hubWorkgroupId = room?.hub?.workgroupId
-
-  useEffect(() => {
-    if (hubWorkgroupId === undefined) { setMembers([]); return undefined }
-    let live = true
-    void callWorkgroup('group-members', { workgroupId: hubWorkgroupId })
-      .then((answer) => { if (live) setMembers(answer.members ?? []) })
-      .catch(() => { if (live) setMembers([]) })
-    return () => { live = false }
-  }, [hubWorkgroupId, room?.log?.length])
+  const members = useLiveMembers(hubWorkgroupId)
 
   if (roomId === null) return h('div', { className: 'bt-wg-empty' }, t('Pick a workgroup, or create one.'))
   if (room === null) return h('div', { className: 'bt-wg-empty' }, t('Loading…'))
 
+  const memberOfLine = (line) => (members ?? []).find(member => member.endpointId === line.memberId
+    || member.membershipId === line.memberId
+    || member.userId === line.memberId)
   const lines = (room.log ?? []).map((line) => {
+    const owner = memberOfLine(line)
     const body = line.kind === undefined
-      ? [h('span', { key: 'who', className: 'bt-wg-line-who' }, `${line.who}：`),
+      ? [h('span', { key: 'who', className: 'bt-wg-line-who' }, `${line.who}：`,
+        // Two colleagues can each have a Bot called "Chief". The member card already says whose
+        // each one is; the line is where a person reads who did the work, so it carries the same
+        // answer. Only a Bot endpoint has an owner tag — a person's line is not a Bot.
+        owner?.memberType === 'botEndpoint'
+          ? h('span', {
+              key: 'owner',
+              className: 'bt-wg-line-owner',
+              'data-mine': owner.ownerIsYou === true ? 'true' : 'false',
+            }, owner.ownerIsYou === true ? t('Yours') : t("A colleague's"))
+          : null),
         h('span', { key: 'text' }, ...markMentions(line.text, room.members)),
         // The line's own files, as buttons. A line with files carries them on `attachments`; the
         // text already names them, so this is the part that actually fetches.

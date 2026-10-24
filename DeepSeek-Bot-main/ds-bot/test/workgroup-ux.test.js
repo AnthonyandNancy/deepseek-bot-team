@@ -191,3 +191,113 @@ test('an approved task can be started, finished and stopped from the panel', () 
   // And the running half comes from the same host call as the waiting half.
   assert.match(tasksSrc, /setActive\(answer\.active \?\? \[\]\)/)
 })
+
+// ── the five reported regressions ───────────────────────────────────────────────
+// These belong to G4's already-delivered surfaces: the open group, the member card and the copied
+// group settings. They are pinned in this TRACKED file because `ds-bot/.gitignore` currently ignores
+// new `test*/` paths; a regression test the repository does not keep is not evidence.
+
+test('the member card follows the Hub roster while the group is open', () => {
+  assert.match(panelSrc, /export function useLiveMembers\(/, 'a live member hook exists')
+  assert.match(panelSrc, /const members = useLiveMembers\(hubWorkgroupId\)/, 'ChatPane mounts it')
+  assert.match(panelSrc, /callWorkgroup\('group-members', \{ workgroupId \}\)/, 'it reads the Hub roster')
+  // The live path is the host feed now; 1200 ms polling was the previous (stale) mechanism and must
+  // not remain as a parallel live path. The slow fallback is asserted by workgroup-realtime.test.js.
+  assert.match(panelSrc, /addEventListener\('workgroup'/, 'it follows the live workgroup signal')
+  assert.match(panelSrc, /setTimeout\(tick, 5000\)/, 'with a slow fallback while mounted')
+  assert.doesNotMatch(panelSrc, /\[hubWorkgroupId, room\?\.log\?\.length\]/,
+    'membership changes are not tied to a new message')
+})
+
+test('the open group and member card converge from one shared revision', () => {
+  const channelSrc = readFileSync(new URL('../src/workgroup/host/channel.js', import.meta.url), 'utf8')
+  // Every workgroup write bumps `wg.state.revision` (host/state.js save). A room that is open must
+  // be able to ask "did anything in this group change?" without downloading the whole transcript on
+  // every tick, and a member change, a rename and a new line all have to produce the same answer.
+  assert.match(channelSrc, /revision: wg\.state\?\.revision \?\? 0/,
+    'the state answer carries the local revision')
+  assert.match(panelSrc, /callWorkgroup\('state'\)/, 'the open group polls the cheap revision first')
+  assert.match(panelSrc, /revision/, 'and compares it before reading the full room')
+})
+
+test('a member row uses the appearance its owner published', () => {
+  // The row used to hand `RoomAvatar` an endpoint id and no roster, so `lookOf()` derived a
+  // different character and colour on every machine.
+  assert.match(panelSrc, /h\(BotMark, \{[^}]*bot: \{/, 'the row draws a Bot mark from a record')
+  assert.match(panelSrc, /avatar: \{\s*\.\.\.\(typeof member\.avatar\.shape === 'string'/,
+    'the published shape is split out of the Hub snapshot')
+  assert.match(panelSrc, /color: member\.avatar\.color/, 'and the published colour reaches the record')
+})
+
+test('a Bot line carries whose Bot spoke, like the member card does', () => {
+  // Two colleagues may both call their butler "Chief". The roster row already distinguishes them;
+  // the conversation is where a person actually reads who did the work, so the line needs the same
+  // answer. `ownerIsYou` comes from the Hub; a line for a person's own message has no owner tag.
+  assert.match(panelSrc, /const memberOfLine = \(line\) => \(members \?\? \[\]\)\.find/,
+    'the line resolves its author against the live Hub roster')
+  assert.match(panelSrc, /const owner = memberOfLine\(line\)/,
+    'each line looks its own member up')
+  assert.match(panelSrc, /data-mine/, 'and says whether that Bot is yours or a colleague\'s')
+  assert.match(panelSrc, /t\('Yours'\)[\s\S]{0,120}t\("A colleague's"\)/,
+    'using the same two words as the member card')
+})
+
+test('the copied group settings read workgroup members and adminId', () => {
+  const settingsSrc = readFileSync(new URL('../src/workgroup/client/group-settings.js', import.meta.url), 'utf8')
+  assert.match(settingsSrc, /const memberRecords = \(room, roster\)/, 'one normaliser for both member shapes')
+  assert.match(settingsSrc, /room\.adminId \?\? room\.admin/, 'the workgroup admin field is read')
+  assert.match(settingsSrc, /memberRecords\(room, roster\)\.length/, 'the subtitle counts records')
+  assert.match(settingsSrc, /const leads = adminIdOf\(room\) === member\.id/, 'the admin tag uses adminId')
+  // The original local-team form is untouched: only the copied file learns the workgroup shape.
+  const originalSettings = readFileSync(new URL('../src/client/group-settings.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(originalSettings, /memberRecords|adminIdOf/, 'the original form keeps its contract')
+})
+
+test('a joined room is initialised by the admin, exactly as a created one is', () => {
+  const groupsSrc = readFileSync(new URL('../src/workgroup/host/groups.js', import.meta.url), 'utf8')
+  // The kickoff is triggered at the first roster that has an answerer, not only at create time.
+  assert.match(groupsSrc, /room\.greeted !== true && \(room\.adminId \?\? null\) !== null/,
+    'the first ready roster asks for a greeting')
+  assert.match(groupsSrc, /greetWorkgroup\(room\.id\)/, 'and delivers it into the room Session')
+  // Joining synchronises the roster; nothing else has to invent a second welcome path.
+  const bridgeSrc = readFileSync(new URL('../src/workgroup/host/bridge.js', import.meta.url), 'utf8')
+  assert.match(bridgeSrc, /async answerInvite\([^]*?await wg\.syncRoster\?\.\(\{ hubWorkgroupId: answer\.workgroupId \}\)/,
+    'accepting a known invitation syncs the joined roster')
+})
+
+test('a Bot reply that crossed the Hub continues the round instead of reading as the user', () => {
+  const groupsSrc = readFileSync(new URL('../src/workgroup/host/groups.js', import.meta.url), 'utf8')
+  const bridgeSrc = readFileSync(new URL('../src/workgroup/host/bridge.js', import.meta.url), 'utf8')
+  // The original asks the next speaker from the line the current speaker posted
+  // (`runRound` -> `mentionsIn` -> `callMembers`). A workgroup member may answer on another
+  // machine, so its line arrives through `receiveRemote`. It has to keep its Bot identity there:
+  // `mine === true && senderEndpointId === undefined` is the USER path, and a Bot's mirrored line
+  // replayed through `ack.ok` used to lose `botEndpointId`, so the author's own machine treated a
+  // Bot's answer as a message typed by the person and opened another round for it.
+  const ack = bridgeSrc.slice(bridgeSrc.indexOf("case 'ack.ok':"))
+  assert.match(ack.slice(0, ack.indexOf('emit(', 0)), /botEndpointId: sent\.botEndpointId/,
+    'a replayed ack keeps the Bot authorship the Hub stored')
+  assert.match(groupsSrc, /receiveRemote[\s\S]*?role: 'post'/,
+    'a Bot line from the Hub enters the path that can choose the next speaker')
+  // And it stays a MEMBER's post. Without `member`, `admin` mode treats an @-less answer as a
+  // plain user message and calls the admin, so every remote reply would start another turn.
+  const receive = groupsSrc.slice(groupsSrc.indexOf('async function receiveRemote('))
+  assert.match(receive.slice(0, receive.indexOf('wg.receiveRemote = receiveRemote')), /member: true/,
+    'a remote Bot line is marked as a member speaking, not as the user')
+})
+
+test('the settings form writes the Hub setting that makes the admin receive plain messages', () => {
+  // The form sends the original's field names (`mode`, `admin`); the workgroup channel forwards
+  // them as this domain's own and the host pushes them to the Hub. A report of "not synced" has to
+  // fail here before it can be called a transport problem.
+  const channelSrc = readFileSync(new URL('../src/workgroup/host/channel.js', import.meta.url), 'utf8')
+  assert.match(channelSrc, /for \(const key of \['name', 'notice', 'mode', 'permission', 'workDir', 'lead'\]\)/,
+    'update-room forwards the reply mode')
+  assert.match(channelSrc, /if \(body\.admin !== undefined && body\.adminId === undefined\) patch\.adminId = body\.admin/,
+    "and the admin under this domain's field name")
+  const groupsSrc = readFileSync(new URL('../src/workgroup/host/groups.js', import.meta.url), 'utf8')
+  assert.match(groupsSrc, /modeChanged \? \{ replyMode: room\.mode \}/, 'the host sends the mode to the Hub')
+  assert.match(groupsSrc, /leadTouched[\s\S]{0,400}leadMembershipId/, 'and the chosen lead with it')
+  assert.match(groupsSrc, /const modeChanged = WG_ROOM_MODES\.includes\(replyMode\) && room\.mode !== replyMode/,
+    'the other machine applies the shared mode on its next roster read')
+})

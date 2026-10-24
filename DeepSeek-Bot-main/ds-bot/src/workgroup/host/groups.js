@@ -212,6 +212,10 @@ export function install(wg) {
         text,
         eventId,
         ...(endpointId === undefined ? {} : { botEndpointId: endpointId }),
+        // The answer to a remote call names the caller's exchange. It travels inside the payload
+        // (not just on the local log line), because the Hub is what carries it back to the machine
+        // whose round is waiting for that exact slot.
+        ...(line.exchangeId === undefined ? {} : { exchangeId: String(line.exchangeId) }),
       }))
       .catch(error => rt.warn('ds-bot: a line in "%s" did not reach the Hub: %s', room.name, error?.message ?? error))
   }
@@ -459,7 +463,7 @@ export function install(wg) {
       }
       if (changed) {
         await retitleWorkgroup(known)
-        await wg.save()
+        await wg.save({ workgroupId: known.hubWorkgroupId, roomId: known.id, kind: 'settings' })
       }
       return known
     }
@@ -484,13 +488,30 @@ export function install(wg) {
   //
   // `adminId` follows the Hub's owner, so a group renamed on one machine and an admin-only round on
   // another agree about who leads.
-  async function applyRoster({ hubWorkgroupId, members: hubMembers, replyMode, permission, leadMembershipId }) {
+  async function applyRoster({ hubWorkgroupId, members: hubMembers, replyMode, permission, leadMembershipId, name, notice }) {
     if (hubWorkgroupId === undefined) return undefined
     await wg.load()
     const room = roomOfHubGroup(hubWorkgroupId)
     if (room === undefined) return undefined
     const roster = Array.isArray(hubMembers) ? hubMembers : undefined
     if (roster === undefined) return room
+    let changedByRoster = false
+    // THE HUB OWNS THE GROUP'S NAME AND NOTICE, TOO.
+    //
+    // `syncRoster` reads the whole group (`GET /v1/workgroups/:id`) but used to pass only the
+    // roster/settings subset into this function. A `member.changed` notification announcing a
+    // rename or a new notice therefore arrived, re-read the Hub, and then dropped those two fields:
+    // the colleague's open room kept its old title and notice until a full room read or restart.
+    // Apply them here, before the "same roster" early return, because a settings change is exactly
+    // a case where the member list did not move.
+    if (typeof name === 'string' && name.trim() !== '' && room.name !== name.trim().slice(0, 60)) {
+      room.name = name.trim().slice(0, 60)
+      changedByRoster = true
+    }
+    if (typeof notice === 'string' && room.notice !== notice.slice(0, 2000)) {
+      room.notice = notice.slice(0, 2000)
+      changedByRoster = true
+    }
 
     const next = roster.map((member) => {
       // A Bot endpoint publishes a name, so it has one. A person's account carries no display name in
@@ -689,10 +710,11 @@ export function install(wg) {
       await rt.setRoomPermission?.(room, room.permission ?? null)
         ?.catch?.(error => rt.warn('ds-bot: permission for %s not applied: %s', room.name, error))
     }
-    if (same && !modeChanged && !permissionChanged) return room
+    if (same && !modeChanged && !permissionChanged && !changedByRoster) return room
     if (modeChanged) room.mode = replyMode
     if (same) {
-      await wg.save()
+      if (changedByRoster) await retitleWorkgroup(room)
+      await wg.save({ workgroupId: room.hubWorkgroupId, roomId: room.id, kind: 'settings' })
       return room
     }
     const previous = room.members ?? []
@@ -716,7 +738,7 @@ export function install(wg) {
         delete map[was]
       }
     }
-    await wg.save()
+    await wg.save({ workgroupId: room.hubWorkgroupId, roomId: room.id, kind: 'roster' })
     // THE GROUP OPENS ITSELF AS SOON AS IT HAS SOMEBODY TO SPEAK.
     //
     // `createWorkgroup` greets immediately, which is right for a group made with members already in
@@ -784,6 +806,10 @@ export function install(wg) {
       replyMode: answer.replyMode,
       permission: answer.permission,
       leadMembershipId: resolvedLeadMembershipId,
+      // The whole group answer is authoritative for these two as well. Dropping them here was why
+      // a Hub settings notification re-read the roster but left the open room's title/notice stale.
+      name: answer.name,
+      notice: answer.notice,
     })
   }
   wg.syncRoster = syncRoster
@@ -1506,6 +1532,13 @@ export function install(wg) {
     // Registered while it runs, so 「停止」 stops this turn too — on the machine whose Bot is
     // actually working, which is the only machine where stopping it means anything.
     const callId = `call-${randomUUID()}`
+    // `roomTurn` keeps a reply timer alive until its signal aborts or the turn answers. A call has
+    // no outer round signal, so it needs its own: keeping the controller (rather than passing
+    // `new AbortController().signal` inline) is what lets `stopRound` end this work and release the
+    // timer when the group is stopped or its runtime is disposed.
+    const controller = new AbortController()
+    round.signal = controller.signal
+    round.abort = () => controller.abort()
     wg.roomProgress.set(callId, round)
     try {
       const lines = unseenLines(room, member.id)
@@ -1520,8 +1553,22 @@ export function install(wg) {
       // `role: 'room'` is what `turn/end` reads to route the result: the answer is posted with
       // `postInRound`, which mirrors it to the Hub, and the caller's machine draws it through the
       // ordinary `receiveRemote` path. That is the whole return journey.
-      const reply = await roomTurn(room, member, session.id, { text, files: [] }, note, new AbortController().signal, round, undefined, [])
-      if (typeof reply === 'string' && !isPass(reply) && reply.trim() !== '') postInRound(room, round, member, reply.trim())
+      // USE THE CALLER'S EXCHANGE, NOT A FRESH ONE.
+      //
+      // `roomTurn` normally mints an exchange id because a local round owns both ends of it. Here
+      // the other end is on another machine, and the caller's round is waiting for that exact id.
+      // A fresh id would make the answer an unrelated post: the caller could not match it to the
+      // slot that asked, so `openingSpeakers` would choose from a new opener and the workgroup's
+      // order would drift from the original group's.
+      const exchangeId = typeof call?.exchangeId === 'string' && call.exchangeId !== ''
+        ? call.exchangeId
+        : undefined
+      const reply = await roomTurn(
+        room, member, session.id, { text, files: [] }, note, controller.signal, round, undefined, [], exchangeId,
+      )
+      if (typeof reply === 'string' && !isPass(reply) && reply.trim() !== '') {
+        postInRound(room, round, member, reply.trim(), { exchangeId })
+      }
     } finally {
       wg.roomProgress.delete(callId)
       await wg.save().catch(() => {})
@@ -1570,8 +1617,17 @@ export function install(wg) {
     // A Hub endpoint may speak as itself; the payload's own name is the next best answer because the
     // sender published it. "A member" is the last resort, and it is a bug when it shows: the roster
     // sync (`applyRoster`) is what normally prevents it.
-    const name = member?.name ?? payload.senderName ?? payload.endpointName ?? 'A member'
-    const memberId = member?.id ?? senderId ?? 'remote'
+    // A LINE WITH AN ENDPOINT IS A BOT, EVEN IF THE ROSTER HAS NOT CAUGHT UP.
+    //
+    // Falling back to the sender's account id made the line's author a person: the UI then drew the
+    // owner's row (and, for an unresolved person, a masked phone) and `@` resolved to an account
+    // that runs no turn. The wire already says which Bot spoke; keep that endpoint as the member id
+    // and use the published Bot name, so the only unknown is the name, never the kind.
+    const fromBot = senderEndpointId !== undefined || member?.kind === 'remoteBot'
+    const name = fromBot
+      ? member?.name ?? payload.senderName ?? payload.endpointName ?? senderEndpointId ?? 'Bot'
+      : member?.name ?? payload.senderName ?? payload.endpointName ?? 'A member'
+    const memberId = member?.id ?? (fromBot ? (senderEndpointId ?? senderId ?? 'remote') : senderId ?? 'remote')
 
     appendLine(room, {
       who: name,
@@ -1594,6 +1650,11 @@ export function install(wg) {
           sha256: file.sha256,
         })),
       }),
+      // Which round exchange this line answers, when it crossed the Hub as a remote member's
+      // reply. The caller uses it to close the exact slot that called this Bot.
+      ...(typeof payload.exchangeId !== 'string' || payload.exchangeId === ''
+        ? {}
+        : { exchangeId: payload.exchangeId }),
     })
     // A line from ANOTHER machine stays out of the group's own Session, and that is deliberate.
     //
@@ -1626,22 +1687,48 @@ export function install(wg) {
       // 后，消息并没有实时更新」: the message was on the Hub, on this machine's disk, and not on
       // the screen.
       //
-      // So a Bot's line is written into the group's Session with `role: 'remote'`, which `cells.js`
-      // draws exactly like a `post` and which the relay hook (`relayStream`) deliberately does NOT
-      // treat as an opener. It is history here, not a cue: the round it belongs to already ran, on
-      // the machine that produced it.
+      // A Bot's line is a MEMBER POST, not view-only history. The original opens the next speaking
+      // slot from the words the current member posted (`runRound` -> `mentionsIn` -> `callMembers`);
+      // a workgroup member may have answered on another machine, so that line arrives here through
+      // the Hub. Labelling it `role: 'remote'` kept it out of the relay and broke the chain after its
+      // first hop: the colleague's Bot answered, but the member it named on THIS machine was never
+      // called. `role: 'post'` is the same opener a local member's answer uses, so the copied
+      // `openingSpeakers` selects the next speaker without inventing a second round algorithm.
       //
-      // A PERSON's line (`member.kind === 'user'`, no endpoint) is left out on purpose. A chat
-      // surface draws a person's own message from the `user/message` event, and writing a second
-      // copy here would show their sentence twice — once as them, once as a group member.
+      // It still does not re-run the round that produced it: the line is already logged (`remote`),
+      // and the relay only opens from this line's own `@` mentions. A PERSON's line is left out on
+      // purpose — their chat is drawn from `user/message`, and a second copy would show it twice.
       await postToGroupSession(room, { id: memberId, name }, text, {
         remote: true,
         form: 'remote',
-        role: 'remote',
+        role: 'post',
+        // A member's post only calls the members it NAMES. Without this flag `openingSpeakers`
+        // reads the opener as the user speaking and `admin` mode asks the admin for a line that
+        // merely answered somebody else — the duplicate/hand-off drift the original never has.
+        member: true,
         ...(files.length === 0 ? {} : { files }),
       }).catch(error => rt.warn('ds-bot: line from %s not shown in %s: %s', name, room.name, error?.message ?? error))
     }
-    await wg.save()
+    // A REMOTE ANSWER CLOSES THE SLOT THAT CALLED IT.
+    //
+    // `runRound` registered a waiter under the exchange it put in the call. The line just entered
+    // the log with the same exchange, so this is where the caller's loop learns the answer without a
+    // second opener and without polling the Hub. A mismatched/absent exchange is an ordinary line
+    // and changes no round; a replay is already refused by `hubEventId` above.
+    if (typeof payload.exchangeId === 'string' && payload.exchangeId !== '') {
+      for (const round of wg.roomProgress.values()) {
+        if (round.roomId !== room.id) continue
+        const waiter = round.remoteWaiters?.get(payload.exchangeId)
+        if (waiter === undefined || waiter.memberId !== memberId) continue
+        round.replies.push({ botId: memberId, name, text, time: Date.now() })
+        waiter.resolve({ text })
+        break
+      }
+    }
+    // Name the group in the save notification so an open window can re-read just this room. The
+    // line may have arrived while the panel was idle; this is what turns the Hub event into a UI
+    // refresh without waiting for the 700 ms poll.
+    await wg.save({ workgroupId, roomId: room.id, kind: 'message' })
     return true
   }
   wg.receiveRemote = receiveRemote
@@ -1908,8 +1995,16 @@ export function install(wg) {
 
   // A member's message in the round: in the log, for the members after it, and in the
   // round's replies, for the user. COPY OF THE ORIGINAL (`postInRound`).
-  const postInRound = (room, round, member, text) => {
-    const line = { who: member.name, memberId: member.id, text }
+  const postInRound = (room, round, member, text, extra = {}) => {
+    const line = {
+      who: member.name,
+      memberId: member.id,
+      text,
+      // Set only for the answer to a call from another machine. A local turn's exchange never
+      // leaves this process, so it has no use for the field; a remote answer needs it to be
+      // matched to the caller's open slot after the Hub round trip.
+      ...(extra.exchangeId === undefined ? {} : { exchangeId: String(extra.exchangeId) }),
+    }
     appendLine(room, line)
     // A member's answer is the conversation, so it belongs on the Hub (see `mirrorLine`). Without
     // this a group's Bot replies lived on one machine only, and a colleague's copy of the group was
@@ -1928,9 +2023,13 @@ export function install(wg) {
   // is never cut off; `say` posts what it writes before its last step into the log while
   // the round is still on it. What the original keeps in `rt.roomWaiters` is kept here in
   // `wg.roomWaiters` (P0-8), and `wg.deliver` is the domain's own delivery seam.
-  async function roomTurn(room, member, sessionId, { text, files }, note, signal, round, by, said = []) {
+  async function roomTurn(room, member, sessionId, { text, files }, note, signal, round, by, said = [], requestedExchangeId = undefined) {
     if (signal.aborted) return null
-    const exchangeId = randomUUID()
+    // A called member reuses the caller's exchange so its answer can be matched to the slot that
+    // asked. A local turn has no caller across the Hub and mints its own, exactly as before.
+    const exchangeId = typeof requestedExchangeId === 'string' && requestedExchangeId !== ''
+      ? requestedExchangeId
+      : randomUUID()
     const turn = { botId: member.id, sessionId, exchangeId }
     const { started } = round
     started.push(turn)
@@ -2064,6 +2163,10 @@ export function install(wg) {
     const found = named.filter(member => member.kind !== 'user' && member.id !== opener.botId)
     if (opener.progress) return found
     if (opener.late) return found.length > 0 ? found : members.filter(member => member.id === opener.askedBy)
+    // COPY OF THE ORIGINAL (`src/host/groups.js:685`): a MEMBER's post only calls the members it
+    // names. Without this, an @-less Bot reply was indistinguishable from the user speaking, and
+    // `admin` mode answered every hand-off with another admin turn.
+    if (opener.member) return found
     if (found.length > 0 && !all) return found
     if (!all && room.mode === 'admin' && admin) return [admin]
     return admin ? [admin, ...members.filter(member => member !== admin)] : members
@@ -2183,10 +2286,31 @@ export function install(wg) {
       // Without the bridge (signed out), the member is reported as skipped rather than as a
       // failed Bot: nothing is broken, the Hub is simply not there.
       if (member.kind !== 'localBot') {
+        // ONE EXCHANGE, ONE SLOT.
+        //
+        // The caller cannot await a model turn that runs on another machine. It can, however, wait
+        // for a signal from the Hub: the called machine answers under this exchange, and the bridge
+        // hands the line to `receiveRemote`. Registering the waiter BEFORE the call closes the race
+        // where a fast answer arrives before the round knows what it is waiting for.
+        const exchangeId = randomUUID()
+        const remoteReply = new Promise((resolve) => {
+          round.remoteWaiters ??= new Map()
+          const timer = setTimeout(() => resolve({ missed: true }), WG_REPLY_TIMEOUT_MS)
+          timer.unref?.()
+          round.remoteWaiters.set(exchangeId, {
+            memberId: member.id,
+            slot,
+            resolve: (value) => { clearTimeout(timer); resolve(value) },
+            // Stopping the round has to release this wait, not leave it to the 240 s timer: a
+            // called Bot on another machine may never answer after the user pressed Stop.
+            cancel: () => { clearTimeout(timer); resolve(null) },
+          })
+        })
         const delivered = await Promise.resolve()
-          .then(() => wg.deliverRemote?.({ room, member, round, slot }))
+          .then(() => wg.deliverRemote?.({ room, member, round, slot: { ...slot, exchangeId, roundId: round.id } }))
           .catch(error => ({ error }))
         if (delivered?.error !== undefined) {
+          round.remoteWaiters?.get(exchangeId)?.resolve(null)
           rt.warn('ds-bot: workgroup line for remote member %s not sent: %s', member.name, delivered.error?.message ?? delivered.error)
           slot.status = 'failed'
           round.failed.push(member.name)
@@ -2194,13 +2318,45 @@ export function install(wg) {
             kind: 'failed', botId: member.id, name: member.name, code: 'HUB',
             text: String(delivered.error?.message ?? delivered.error).slice(0, 300), time: Date.now(),
           })
-        } else if (delivered?.queued === true || delivered?.sent === true) {
-          slot.status = 'remote'
-        } else {
-          // No bridge: the member is on another device and this machine cannot reach it.
-          slot.status = 'remote'
+          round.speaking = null
+          continue
         }
+        if (delivered?.skipped !== undefined) {
+          round.remoteWaiters?.get(exchangeId)?.resolve(null)
+          // A member that cannot be called (a person, or an endpoint-less row) is not a silent
+          // "missed": the round records why it did not run, so the user can fix the membership.
+          slot.status = 'failed'
+          round.failed.push(member.name)
+          round.replies.push({
+            kind: 'failed', botId: member.id, name: member.name, code: 'HUB',
+            text: `This member cannot be called (${delivered.skipped}).`,
+            time: Date.now(),
+          })
+          round.speaking = null
+          continue
+        }
+        slot.status = 'remote'
+        const answered = await remoteReply
+        round.remoteWaiters?.delete(exchangeId)
         round.speaking = null
+        if (answered === null || answered?.missed === true || answered === undefined) {
+          slot.status = 'missed'
+          round.passed.push(member.name)
+          if (answered?.missed === true) round.replies.push({ kind: 'missed', botId: member.id, name: member.name, time: Date.now() })
+          continue
+        }
+        // A member's answer calls only the members it NAMES, exactly as the local `runRound`
+        // continuation below does. The exchange has already put the words in the log and the
+        // round's replies; this adds the next slot rather than opening a second round.
+        slot.status = 'posted'
+        const spoken = answered.text
+        const leads = room.adminId !== undefined && room.adminId !== null && room.adminId === member.id
+        const everyone = room.members ?? []
+        const others = everyone.filter(other => other.id !== member.id)
+        const { all, found: named } = mentionsIn(spoken, everyone)
+        const found = named.filter(other => other.id !== member.id)
+        const callees = leads && all ? [...found, ...others.filter(other => !found.includes(other))] : found
+        callMembers(round, turns, index, callees, `${member.name} mentioned you`, leads ? WG_ADMIN_TURNS_EACH : WG_TURNS_EACH, member.id)
         continue
       }
       let session
@@ -2365,6 +2521,14 @@ export function install(wg) {
     if (rounds.length === 0) return false
     let stopped = false
     for (const round of rounds) {
+      // A called Bot's turn has no outer `exec.signal`; aborting its own controller is what makes
+      // `roomTurn` clear its reply timer. Without it, stopping the round left a 240 s timer keeping
+      // the process alive even though no Bot was working any more.
+      round.abort?.()
+      // A remote member is not in `round.started` (that list is local member turns), so its waiter
+      // needs its own cancellation. Without this, Stop left the round open until the reply timeout.
+      for (const waiter of round.remoteWaiters?.values() ?? []) waiter.cancel?.()
+      round.remoteWaiters?.clear()
       for (const started of round.started ?? []) {
         stoppedExchanges.add(started.exchangeId)
         if (stoppedExchanges.size > STOPPED_KEPT) stoppedExchanges.delete(stoppedExchanges.values().next().value)

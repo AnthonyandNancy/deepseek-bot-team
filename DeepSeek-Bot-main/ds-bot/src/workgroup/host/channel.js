@@ -89,6 +89,9 @@ export function install(wg) {
         via: line.via ?? null,
         hubEventId: line.hubEventId ?? null,
         hubSeq: line.hubSeq ?? null,
+        // The round exchange an answer closes. A local line has none; a remote Bot's answer has
+        // the caller's, so a test (and a later UI) can tell which call it belongs to.
+        exchangeId: line.exchangeId ?? null,
         // The line's files, so the pane can offer a download. Absent on a text-only line.
         ...(Array.isArray(line.attachments) && line.attachments.length > 0 ? { attachments: line.attachments } : {}),
       })),
@@ -144,6 +147,10 @@ export function install(wg) {
           // mascot know who is at work before the next poll of the original route. `work` is
           // this domain's own view — the original's never holds a workgroup member Session.
           return ok({
+            // The shared change counter for this domain's state file. The open group and its member
+            // card ask for this cheap answer first and read the room only when it moved, so a new
+            // line, a rename and a roster change all converge through ONE signal.
+            revision: wg.state?.revision ?? 0,
             rooms: listView(),
             route: WG_ROUTE,
             activity: activityView(),
@@ -384,8 +391,13 @@ export function install(wg) {
           const text = String(body.text ?? '')
           if (workgroupId === '') throw invalid('No workgroup named')
           if (text.trim() === '') throw invalid('Nothing to send')
-          if (wg.roomOfHubGroup?.(workgroupId) === undefined) return fail('Unknown workgroup', 'bot/not-found')
+          const room = wg.roomOfHubGroup?.(workgroupId)
+          if (room === undefined) return fail('Unknown workgroup', 'bot/not-found')
           const result = await wg.bridge.send({ workgroupId, text })
+          // The Hub ack is applied asynchronously by the bridge. The sender's own room is saved when
+          // that event is received; this nudge makes the current window re-read it without waiting
+          // for the next poll. `room.id` is this machine's local id, which is what `room` takes.
+          try { rt.workgroupStateSaved?.({ revision: wg.state?.revision ?? 0, workgroupId, roomId: room.id, kind: 'message' }) } catch { /* best effort */ }
           return ok({
             eventId: result.eventId,
             // `queued` is shown to the person: a message typed with no socket is kept, not lost.

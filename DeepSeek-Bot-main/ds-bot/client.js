@@ -6478,6 +6478,7 @@ var WG_CSS = `
 @media (prefers-reduced-motion:reduce){.bt-wg-working-line{animation:none}}
 .bt-wg-line{font-size:14px;line-height:21px;color:var(--bt-ink,#141414);overflow-wrap:anywhere}
 .bt-wg-line-who{font-weight:600;color:var(--bt-ink-2,rgba(20,20,20,.6))}
+.bt-wg-line-owner{display:inline-block;margin-inline-start:5px;padding:0 4px;border-radius:5px;background:var(--bt-hover,rgba(119,119,119,.09));font-size:10px;line-height:15px;font-weight:400;color:var(--bt-ink-3,rgba(20,20,20,.36));vertical-align:1px}
 .bt-wg-at{color:var(--bt-accent,#4d6bfe);font-weight:500;border-radius:4px}
 .bt-wg-at-all{background:var(--bt-tag-bg,rgba(20,20,20,.06));padding:0 3px}
 .bt-wg-line-note{font-size:12px;line-height:18px;color:var(--bt-ink-3,rgba(20,20,20,.36));font-style:italic}
@@ -6592,6 +6593,33 @@ async function openWorkgroup(id) {
     setState({ error: error?.message ?? String(error) });
   }
 }
+var FEED_PATH = "api/bot/feed";
+var liveListeners = /* @__PURE__ */ new Set();
+var liveSource;
+var listenLive = (fn) => {
+  liveListeners.add(fn);
+  if (liveSource === void 0 && typeof EventSource === "function") {
+    liveSource = new EventSource(FEED_PATH);
+    const notify = (payload) => {
+      for (const listener of liveListeners) listener(payload ?? {});
+    };
+    liveSource.addEventListener("workgroup", (event) => {
+      let payload = {};
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+      }
+      notify(payload);
+    });
+    liveSource.addEventListener("revision", () => notify({ kind: "revision" }));
+  }
+  return () => {
+    liveListeners.delete(fn);
+    if (liveListeners.size > 0) return;
+    liveSource?.close?.();
+    liveSource = void 0;
+  };
+};
 var roomSignature = (room2) => JSON.stringify([
   room2?.name,
   room2?.notice,
@@ -6608,9 +6636,13 @@ function useLiveRoom(roomId) {
     let live = true;
     let timer;
     let running = false;
+    let pending = false;
     let last = roomSignature(store.getSnapshot().room);
-    const poll = async () => {
-      if (running) return;
+    const read = async () => {
+      if (running) {
+        pending = true;
+        return;
+      }
       running = true;
       try {
         const room2 = await callWorkgroup("room", { id: roomId });
@@ -6623,15 +6655,93 @@ function useLiveRoom(roomId) {
       } catch {
       } finally {
         running = false;
-        if (live) timer = setTimeout(poll, 1200);
+        if (pending) {
+          pending = false;
+          void read();
+        }
       }
     };
-    void poll();
+    const off = listenLive(() => {
+      void read();
+    });
+    const tick = () => {
+      if (!live) return;
+      void read().finally(() => {
+        if (live) timer = setTimeout(tick, 5e3);
+      });
+    };
+    void read();
+    timer = setTimeout(tick, 5e3);
     return () => {
       live = false;
       clearTimeout(timer);
+      off();
     };
   }, [roomId]);
+}
+var memberSignature = (members) => JSON.stringify((members ?? []).map((member) => [
+  member.membershipId,
+  member.name,
+  member.role,
+  member.ownerIsYou,
+  member.avatar,
+  member.color,
+  member.online
+]));
+function useLiveMembers(workgroupId) {
+  const [members, setMembers] = (0, import_react13.useState)([]);
+  (0, import_react13.useEffect)(() => {
+    if (workgroupId === void 0) {
+      setMembers([]);
+      return void 0;
+    }
+    let live = true;
+    let timer;
+    let running = false;
+    let pending = false;
+    let last = memberSignature(members);
+    const read = async () => {
+      if (running) {
+        pending = true;
+        return;
+      }
+      running = true;
+      try {
+        const answer = await callWorkgroup("group-members", { workgroupId });
+        if (!live) return;
+        const next = answer?.members ?? [];
+        const signature = memberSignature(next);
+        if (signature !== last) {
+          last = signature;
+          setMembers(next);
+        }
+      } catch {
+      } finally {
+        running = false;
+        if (pending) {
+          pending = false;
+          void read();
+        }
+      }
+    };
+    const off = listenLive(() => {
+      void read();
+    });
+    const tick = () => {
+      if (!live) return;
+      void read().finally(() => {
+        if (live) timer = setTimeout(tick, 5e3);
+      });
+    };
+    void read();
+    timer = setTimeout(tick, 5e3);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+      off();
+    };
+  }, [workgroupId]);
+  return members;
 }
 async function createWorkgroup(name, members = []) {
   const room2 = await callWorkgroup("create-room", { name, members });
@@ -7010,7 +7120,23 @@ function MemberList({ hub, members, onInvite }) {
         // called "Chief". Without this tag the roster is a list of names with no way to tell whose is
         // whose — the user's 「需要在每个 bot 增加标识，区分每个 bot 的归属」. "Yours" is the Hub's own
         // answer (`ownerIsYou`, computed from the authenticated connection), so it cannot be faked.
-        member.memberType === "botEndpoint" ? (0, import_react13.createElement)(RoomAvatar, { room: { members: [member.endpointId] }, size: 16 }) : null,
+        member.memberType === "botEndpoint" ? (0, import_react13.createElement)(BotMark, {
+          bot: {
+            id: member.endpointId,
+            name: member.name,
+            // `lookOf()` reads the colour from the record and the shape/photo from `avatar`.
+            // The Hub's published snapshot groups all three; split it the same way here.
+            ...member.color !== void 0 ? { color: member.color } : typeof member.avatar?.color === "string" ? { color: member.avatar.color } : {},
+            ...member.avatar === void 0 ? {} : {
+              avatar: {
+                ...typeof member.avatar.shape === "string" ? { shape: member.avatar.shape } : {},
+                ...typeof member.avatar.image === "string" ? { image: member.avatar.image } : {}
+              }
+            }
+          },
+          size: 16,
+          live: false
+        }) : null,
         (0, import_react13.createElement)(
           "span",
           { className: "bt-wg-roster-name" },
@@ -7064,28 +7190,27 @@ function ChatPane({ roomId, roster }) {
   const state = useWorkgroupState();
   useLiveRoom(roomId);
   const room2 = state.room;
-  const [members, setMembers] = (0, import_react13.useState)([]);
   const hubWorkgroupId = room2?.hub?.workgroupId;
-  (0, import_react13.useEffect)(() => {
-    if (hubWorkgroupId === void 0) {
-      setMembers([]);
-      return void 0;
-    }
-    let live = true;
-    void callWorkgroup("group-members", { workgroupId: hubWorkgroupId }).then((answer) => {
-      if (live) setMembers(answer.members ?? []);
-    }).catch(() => {
-      if (live) setMembers([]);
-    });
-    return () => {
-      live = false;
-    };
-  }, [hubWorkgroupId, room2?.log?.length]);
+  const members = useLiveMembers(hubWorkgroupId);
   if (roomId === null) return (0, import_react13.createElement)("div", { className: "bt-wg-empty" }, t("Pick a workgroup, or create one."));
   if (room2 === null) return (0, import_react13.createElement)("div", { className: "bt-wg-empty" }, t("Loading…"));
+  const memberOfLine = (line) => (members ?? []).find((member) => member.endpointId === line.memberId || member.membershipId === line.memberId || member.userId === line.memberId);
   const lines = (room2.log ?? []).map((line) => {
+    const owner = memberOfLine(line);
     const body = line.kind === void 0 ? [
-      (0, import_react13.createElement)("span", { key: "who", className: "bt-wg-line-who" }, `${line.who}：`),
+      (0, import_react13.createElement)(
+        "span",
+        { key: "who", className: "bt-wg-line-who" },
+        `${line.who}：`,
+        // Two colleagues can each have a Bot called "Chief". The member card already says whose
+        // each one is; the line is where a person reads who did the work, so it carries the same
+        // answer. Only a Bot endpoint has an owner tag — a person's line is not a Bot.
+        owner?.memberType === "botEndpoint" ? (0, import_react13.createElement)("span", {
+          key: "owner",
+          className: "bt-wg-line-owner",
+          "data-mine": owner.ownerIsYou === true ? "true" : "false"
+        }, owner.ownerIsYou === true ? t("Yours") : t("A colleague's")) : null
+      ),
       (0, import_react13.createElement)("span", { key: "text" }, ...markMentions(line.text, room2.members)),
       // The line's own files, as buttons. A line with files carries them on `attachments`; the
       // text already names them, so this is the part that actually fetches.
@@ -12281,10 +12406,16 @@ var ROOM_MODES2 = [
   ["admin", "Admin leads", "Plain messages go to the admin, who calls others with @Name."],
   ["everyone", "Everyone", "Every member answers in turn, admin first."]
 ];
-var shownMode2 = (room2, roster) => roster.byId[room2.admin] ? room2.mode : "everyone";
+var memberRecords = (room2, roster) => (room2.members ?? []).map((member) => member !== null && typeof member === "object" ? member : roster.byId[member]).filter(Boolean);
+var adminIdOf = (room2) => room2.adminId ?? room2.admin ?? null;
+var adminOf = (room2, roster) => {
+  const id = adminIdOf(room2);
+  return id === null ? void 0 : roster.byId[id] ?? memberRecords(room2, roster).find((member) => member.id === id);
+};
+var shownMode2 = (room2, roster) => adminOf(room2, roster) ? room2.mode : "everyone";
 function roomSubtitle2(room2, roster) {
-  const admin = roster.byId[room2.admin];
-  return [t("{count} members", { count: room2.members.length }), admin ? t("Admin {name}", { name: admin.name }) : t("No admin")].join(" · ");
+  const admin = adminOf(room2, roster);
+  return [t("{count} members", { count: memberRecords(room2, roster).length }), admin ? t("Admin {name}", { name: admin.name }) : t("No admin")].join(" · ");
 }
 function GroupPermission2({ room: room2, catalog, update }) {
   if (!catalog?.options?.length) return null;
@@ -12313,9 +12444,10 @@ function GroupSettingsForm2({ room: room2, roster, actions, run: run2, onDeleted
     const timer = setTimeout(() => setConfirming(false), 4e3);
     return () => clearTimeout(timer);
   }, [confirming]);
-  const members = room2.members.map((id) => roster.byId[id]).filter(Boolean);
-  const outside = roster.bots.filter((bot) => !room2.members.includes(bot.id));
-  const admin = roster.byId[room2.admin];
+  const members = memberRecords(room2, roster);
+  const memberIds = new Set(members.map((member) => member.id));
+  const outside = roster.bots.filter((bot) => !memberIds.has(bot.id));
+  const admin = adminOf(room2, roster);
   const mode = shownMode2(room2, roster);
   const modeHint = ROOM_MODES2.find(([id]) => id === mode)?.[2] ?? "";
   const update = (patch) => run2(actions.updateRoom(room2.id, patch));
@@ -12394,7 +12526,7 @@ function GroupSettingsForm2({ room: room2, roster, actions, run: run2, onDeleted
       Card,
       { title: t("Members · {count}", { count: members.length }) },
       members.map((member) => {
-        const leads = room2.admin === member.id;
+        const leads = adminIdOf(room2) === member.id;
         return (0, import_react33.createElement)(
           "div",
           { key: member.id, className: "bt-set-row bt-bs-row bt-gs-member" },

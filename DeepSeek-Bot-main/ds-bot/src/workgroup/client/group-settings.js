@@ -34,12 +34,25 @@ export const ROOM_MODES = [
   ['everyone', 'Everyone', 'Every member answers in turn, admin first.'],
 ]
 
+// A workgroup's member list is already a list of RECORDS (`{ id, name, kind }`) and its admin is
+// `adminId`; the local-team form this was copied from uses ids plus `room.admin`. Reading the local
+// shape here silently dropped every member row and printed "No admin" for a workgroup that has one.
+// This normalises both shapes in one place, leaving the original form's contract untouched.
+const memberRecords = (room, roster) => (room.members ?? [])
+  .map(member => (member !== null && typeof member === 'object' ? member : roster.byId[member]))
+  .filter(Boolean)
+const adminIdOf = room => room.adminId ?? room.admin ?? null
+const adminOf = (room, roster) => {
+  const id = adminIdOf(room)
+  return id === null ? undefined : roster.byId[id] ?? memberRecords(room, roster).find(member => member.id === id)
+}
+
 // Without an admin the host answers as everyone, whatever the stored mode says.
-export const shownMode = (room, roster) => (roster.byId[room.admin] ? room.mode : 'everyone')
+export const shownMode = (room, roster) => (adminOf(room, roster) ? room.mode : 'everyone')
 
 export function roomSubtitle(room, roster) {
-  const admin = roster.byId[room.admin]
-  return [t('{count} members', { count: room.members.length }), admin ? t('Admin {name}', { name: admin.name }) : t('No admin')].join(' · ')
+  const admin = adminOf(room, roster)
+  return [t('{count} members', { count: memberRecords(room, roster).length }), admin ? t('Admin {name}', { name: admin.name }) : t('No admin')].join(' · ')
 }
 
 // One preset for every member in the group, or each member's own. Turning it on starts
@@ -67,9 +80,10 @@ export function GroupSettingsForm({ room, roster, actions, run, onDeleted }) {
     const timer = setTimeout(() => setConfirming(false), 4000)
     return () => clearTimeout(timer)
   }, [confirming])
-  const members = room.members.map(id => roster.byId[id]).filter(Boolean)
-  const outside = roster.bots.filter(bot => !room.members.includes(bot.id))
-  const admin = roster.byId[room.admin]
+  const members = memberRecords(room, roster)
+  const memberIds = new Set(members.map(member => member.id))
+  const outside = roster.bots.filter(bot => !memberIds.has(bot.id))
+  const admin = adminOf(room, roster)
   const mode = shownMode(room, roster)
   const modeHint = ROOM_MODES.find(([id]) => id === mode)?.[2] ?? ''
   const update = patch => run(actions.updateRoom(room.id, patch))
@@ -104,7 +118,7 @@ export function GroupSettingsForm({ room, roster, actions, run, onDeleted }) {
     h(GroupPermission, { room, catalog: roster.permissions, update }),
     h(Card, { title: t('Members · {count}', { count: members.length }) },
       members.map((member) => {
-        const leads = room.admin === member.id
+        const leads = adminIdOf(room) === member.id
         return h('div', { key: member.id, className: 'bt-set-row bt-bs-row bt-gs-member' },
           h('button', { type: 'button', className: 'bt-gs-who', title: t("Open {name}'s chat", { name: member.name }), onClick: () => openBot(member.id) },
             h(BotAvatar, { bot: member, size: 26, main: isMainOf(roster, member.id), admin: leads, live: false }),

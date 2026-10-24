@@ -1,0 +1,643 @@
+// G4 real-time regressions: the four gates a workgroup cannot pass on host-state tests alone.
+//
+// This file deliberately lives outside `test/` because the repository's `.gitignore` currently
+// ignores that whole directory (`test/`), and a regression test the repository does not keep is not
+// evidence. `package.json` runs `test/*.test.js` plus `test-realtime/*.test.js`.
+//
+// What it drives:
+//   * a real Hub (two registered accounts, two live WSS sockets);
+//   * two real `createRuntime` machines with real `workgroup` installs;
+//   * the same `apiHandle` endpoints the panel calls (`create-room`, `invite-member`,
+//     `answer-invite`, `send-hub`, `room`, `group-members`);
+//   * the real `/api/bot/feed` route for the live signal;
+//   * no direct `bridge.start()`, `syncRoster()` or fixture that writes a round's slots.
+import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { test } from 'node:test'
+import { createRuntime } from '../index.js'
+import { fakeContext } from '../test/fake-ctx.js'
+
+const PASSWORD = 'correct horse battery staple'
+const ALICE = '+8613800138000'
+const BOB = '+8613900139000'
+
+const TEAM = (main, second) => ({
+  version: 1,
+  mainBotIds: [main.id],
+  workspaceId: 'w1',
+  bots: {
+    [main.id]: { ...main, sessionId: main.id, createdAt: 1 },
+    [second.id]: { ...second, sessionId: second.id, createdAt: 2 },
+  },
+  rooms: {},
+  agents: {},
+  capabilities: { items: {} },
+  exchanges: [],
+  exchangeTurns: {},
+  works: {},
+  questions: {},
+  views: {},
+  prefs: {},
+  switching: {},
+  revision: 0,
+})
+
+const ALICE_TEAM = TEAM(
+  { id: 'a', name: 'Chief', role: 'Boss' },
+  { id: 'a2', name: 'Researcher', role: 'Research' },
+)
+const BOB_TEAM = TEAM(
+  { id: 'b', name: 'BobChief', role: 'Boss' },
+  { id: 'b2', name: 'BobWriter', role: 'Write' },
+)
+
+async function withHub(t) {
+  const { createHub } = await import('../../../hub/src/server.js')
+  const { createMemoryLogger } = await import('../../../hub/src/log.js')
+  const dataDir = mkdtempSync(join(tmpdir(), 'ds-bot-wg-realtime-hub-'))
+  const hub = createHub({
+    config: {
+      host: '127.0.0.1', port: 0, tls: null, allowInsecure: true, insecureLoopbackOnly: true, dataDir,
+      accessTtlMs: 30 * 60 * 1000, refreshTtlMs: 24 * 60 * 60 * 1000, logLevel: 'error',
+    },
+    logger: createMemoryLogger().logger,
+  })
+  const address = await hub.listen()
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  t.after(async () => {
+    await hub.close()
+    rmSync(dataDir, { recursive: true, force: true, maxRetries: 5 })
+  })
+  for (const phone of [ALICE, BOB]) {
+    await fetch(`${baseUrl}/v1/auth/register`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ phone, password: PASSWORD }),
+    })
+  }
+  return { hub, baseUrl }
+}
+
+async function machine(t, { baseUrl, phone, team, name = 'machine' }) {
+  const root = mkdtempSync(join(tmpdir(), `ds-bot-wg-realtime-${name}-`))
+  const home = join(root, 'bot')
+  mkdirSync(home, { recursive: true })
+  writeFileSync(join(home, 'state.json'), JSON.stringify(team))
+  const ctx = fakeContext()
+  const routes = {}
+  const registerRoute = ctx.connection.fetch.register
+  ctx.connection.fetch.register = (options) => {
+    routes[options.path] = options
+    return registerRoute(options)
+  }
+  const workspaces = new Map()
+  const followups = []
+  Object.assign(ctx, {
+    llm: { listProviders: () => [] },
+    workspaceRegistry: {
+      get: id => workspaces.get(id),
+      resolveByPath: async () => undefined,
+      create: async (path) => {
+        const workspace = { id: `w${workspaces.size + 1}`, path }
+        workspaces.set(workspace.id, workspace)
+        return workspace
+      },
+      archiveSession: async () => {},
+    },
+    sessionController: {
+      create: async () => ({ sessionId: `s-${Math.random().toString(16).slice(2)}` }),
+      resolveAgent: async sessionId => ({
+        agent: {
+          session: { id: sessionId },
+          followup: (message) => { followups.push({ sessionId, message }) },
+          cancel: () => {},
+        },
+      }),
+      selectModel: async () => {},
+      prompt: async ({ sessionId, content, source }) => {
+        followups.push({ sessionId, message: { content, source } })
+        return { accepted: true }
+      },
+      page: async () => ({ events: [] }),
+    },
+    sessionTitle: { rename: async () => {} },
+    sessions: { flush: async () => {} },
+  })
+  const rt = createRuntime(ctx, { home })
+  t.after(async () => {
+    await rt.workgroup?.bridge?.stop?.().catch?.(() => {})
+    await ctx.dispose()
+    rmSync(root, { recursive: true, force: true, maxRetries: 5 })
+  })
+  const wg = rt.workgroup
+  const call = (endpoint, payload) => wg.apiHandle(endpoint, payload)
+  const signedIn = await call('hub-login', { baseUrl, phone, password: PASSWORD })
+  assert.equal(signedIn.ok, true, `sign-in failed: ${JSON.stringify(signedIn.error)}`)
+  return { rt, wg, call, routes, followups }
+}
+
+async function until(predicate, { timeoutMs = 8000, label = 'condition' } = {}) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (await predicate()) return true
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
+// Reads one SSE frame at a time. A comment keeps the connection alive without becoming a frame.
+function reader(response) {
+  const source = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  return async function next() {
+    for (;;) {
+      const end = buffer.indexOf('\n\n')
+      if (end >= 0) {
+        const block = buffer.slice(0, end)
+        buffer = buffer.slice(end + 2)
+        if (block.startsWith(':')) continue
+        const field = name => block.split('\n').find(line => line.startsWith(`${name}: `))?.slice(name.length + 2)
+        return { event: field('event'), data: JSON.parse(field('data')) }
+      }
+      const { value, done } = await source.read()
+      if (done) return undefined
+      buffer += decoder.decode(value, { stream: true })
+    }
+  }
+}
+
+async function invitedPair(t) {
+  const { baseUrl } = await withHub(t)
+  const alice = await machine(t, { baseUrl, phone: ALICE, team: ALICE_TEAM, name: 'alice' })
+  const bob = await machine(t, { baseUrl, phone: BOB, team: BOB_TEAM, name: 'bob' })
+  await until(() => alice.wg.bridge.status().connected && bob.wg.bridge.status().connected, { label: 'both sockets' })
+  const created = await alice.call('create-room', {
+    name: '实时回归',
+    members: [
+      { id: 'a', name: 'Chief', kind: 'localBot' },
+      { id: 'a2', name: 'Researcher', kind: 'localBot' },
+    ],
+  })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+  const workgroupId = created.value.hub?.workgroupId
+  assert.ok(workgroupId !== undefined)
+  const invited = await alice.call('invite-member', { workgroupId, phone: BOB })
+  assert.equal(invited.ok, true, JSON.stringify(invited.error))
+  const incoming = await bob.call('group-invites', {})
+  const invite = incoming.value.incoming[0]
+  const accepted = await bob.call('answer-invite', { inviteId: invite.inviteId, accept: true })
+  assert.equal(accepted.ok, true, JSON.stringify(accepted.error))
+  const joined = await bob.wg.bridge.joinWithPrimaryBot({ workgroupId })
+  assert.equal(joined.length, 1, 'Bob brings his own Bot explicitly')
+  return { baseUrl, alice, bob, workgroupId }
+}
+
+function roomOf(machine, workgroupId) {
+  return machine.wg.roomOfHubGroup(workgroupId)
+}
+
+function lineByText(machine, workgroupId, text) {
+  return (roomOf(machine, workgroupId)?.log ?? []).find(line => line.text === text)
+}
+
+// 1. A LIVE WORKGROUP SAVE MUST REACH THE WINDOW THROUGH THE ORIGINAL FEED.
+//
+// The panel currently polls `/api/workgroup` every 700 ms for the room and 1200 ms for the roster.
+// The host already has `/api/bot/feed` for exactly this job. A workgroup save must publish a feed
+// event, and the event must name the workgroup and its revision, so the panel can refresh without
+// waiting for a poll.
+test('a workgroup save is delivered by the existing live feed', async (t) => {
+  const { alice, workgroupId } = await invitedPair(t)
+  const abort = new AbortController()
+  const response = await alice.routes['/api/bot/feed'].fetch(
+    new Request('http://localhost/api/bot/feed', { signal: abort.signal }),
+  )
+  const next = reader(response)
+  // The first frame is always `hello`; it names the team revision, not the workgroup one.
+  const hello = await next()
+  assert.equal(hello.event, 'hello')
+
+  // A user message is a workgroup save and a new line. It must publish a workgroup event; the
+  // ordinary `revision` event is the original team's file and is not a workgroup signal.
+  const sent = await alice.call('send-hub', { workgroupId, text: 'feed 要能看到这一行' })
+  assert.equal(sent.ok, true, JSON.stringify(sent.error))
+
+  const frames = []
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline && !frames.some(frame => String(frame.event).startsWith('workgroup'))) {
+    const frame = await Promise.race([
+      next(),
+      new Promise(resolve => setTimeout(() => resolve(undefined), 150)),
+    ])
+    if (frame !== undefined) frames.push(frame)
+  }
+  abort.abort()
+  assert.ok(frames.some(frame => String(frame.event).startsWith('workgroup')),
+    `the feed must publish a workgroup event before any 700 ms poll: ${JSON.stringify(frames)}`)
+  const changed = frames.find(frame => String(frame.event).startsWith('workgroup'))
+  assert.equal(changed.data.workgroupId, workgroupId, 'and the event names the group')
+  assert.equal(typeof changed.data.revision, 'number', 'and the revision the window must re-read')
+})
+
+// 1b. THE PANEL MUST SUBSCRIBE TO THAT FEED, NOT ONLY POLL THE HOST.
+//
+// The host can publish a workgroup event and the test above proves it. That is not a live UI unless
+// the panel listens. This is a source-level contract because the panel's React hooks are compiled
+// into `client.js` and a browser render harness is outside this file; the contract is narrow: one
+// EventSource on `/api/bot/feed`, a workgroup event handler that re-reads the open room and the
+// roster, and a slow fallback poll rather than 700/1200 ms as the live path.
+test('the workgroup panel subscribes to the live feed and keeps polling only as a fallback', () => {
+  const panel = readFileSync(new URL('../src/workgroup/client/panel.js', import.meta.url), 'utf8')
+  assert.match(panel, /new EventSource\(/, 'the panel opens the existing feed')
+  assert.match(panel, /api\/bot\/feed|FEED_ROUTE|\/feed/, 'and it is the host feed route')
+  assert.match(panel, /addEventListener\('workgroup'/, 'it handles the workgroup event')
+  assert.match(panel, /callWorkgroup\('room'/, 'a workgroup event re-reads the open room')
+  assert.match(panel, /callWorkgroup\('group-members'/, 'and refreshes the Hub roster')
+  assert.doesNotMatch(panel, /setTimeout\(poll, 700\)/, '700 ms polling is no longer the live path')
+  assert.doesNotMatch(panel, /setTimeout\(poll, 1200\)/, '1200 ms polling is no longer the live path')
+  assert.match(panel, /setTimeout\(tick, 5000\)/, 'a slow fallback remains for a dropped stream')
+})
+
+// 2. A COLLEAGUE'S BOT MUST NEVER BE RENDERED AS A PHONE NUMBER.
+//
+// The Hub stores a Bot endpoint's published name separately from the person's masked phone. A
+// workgroup member row is built in `applyRoster`; an endpoint missing its name must fall back to a
+// Bot name/id, never to the person's number. This is the data every client surface reads.
+test("a Bot member never falls back to its owner's phone number", async (t) => {
+  const { alice, workgroupId } = await invitedPair(t)
+  await alice.wg.syncRoster({ hubWorkgroupId: workgroupId })
+  const roster = await alice.call('group-members', { workgroupId })
+  assert.equal(roster.ok, true, JSON.stringify(roster.error))
+  const bots = (roster.value.members ?? []).filter(member => member.memberType === 'botEndpoint')
+  assert.ok(bots.length >= 1, `there is a Bot to inspect: ${JSON.stringify(roster.value.members)}`)
+  for (const bot of bots) {
+    // The Hub's own roster is the input to `applyRoster`; its `name` is the published Bot name.
+    assert.equal(typeof bot.name, 'string', `a Bot has a name: ${JSON.stringify(bot)}`)
+    assert.notEqual(bot.name, bot.phoneMasked, `a Bot must not be named by a phone number: ${JSON.stringify(bot)}`)
+    assert.equal(typeof bot.phoneMasked, 'undefined', `a Bot row carries no person phone: ${JSON.stringify(bot)}`)
+    // And the member record the local room keeps must carry the Bot identity, not a person row.
+    const local = (alice.wg.roomOfHubGroup(workgroupId)?.members ?? []).find(member => member.endpointId === bot.endpointId)
+    assert.ok(local !== undefined, `the local roster has the Bot: ${JSON.stringify(alice.wg.roomOfHubGroup(workgroupId)?.members)}`)
+    // `invitedPair` runs this assertion on ALICE's machine, where Bob's Bot is remote. The same
+    // member on Bob's own machine resolves to `localBot`; both must be Bot records, never a person.
+    assert.ok(local.kind === 'remoteBot' || local.kind === 'localBot',
+      `the local record is a Bot: ${JSON.stringify(local)}`)
+    assert.equal(local.name, bot.name, "the local record keeps the Bot's published name")
+    assert.notEqual(local.name, bot.phoneMasked, 'and never the owner phone')
+  }
+
+  // AN ENDPOINT WITHOUT A CONTRACT NAME STILL MUST NOT BECOME A PERSON.
+  //
+  // Real Hub rows can lose their name to an older publish or a truncated migration. That is not a
+  // reason to relabel somebody's Bot as the owner: the Bot is still the endpoint, and the safe
+  // fallback is its endpoint id (the UI can say "Bot"). Drive `applyRoster` with the same Hub shape
+  // and assert the projection, which is what every client surface reads.
+  const remote = bots.find(bot => bot.ownerIsYou !== true)
+  assert.ok(remote !== undefined, 'the group has a colleague Bot to project')
+  const answer = await alice.wg.hub.workgroup(workgroupId)
+  const rosterAnswer = {
+    ...answer,
+    members: answer.members.map(member => member.endpointId === remote.endpointId
+      ? { ...member, name: '', endpointName: undefined, phoneMasked: '+86 138 **** 8000' }
+      : member),
+  }
+  await alice.wg.applyRoster({
+    hubWorkgroupId: workgroupId,
+    members: rosterAnswer.members,
+    replyMode: rosterAnswer.replyMode,
+    permission: rosterAnswer.permission,
+    leadMembershipId: rosterAnswer.leadMembershipId,
+  })
+  const fallback = (alice.wg.roomOfHubGroup(workgroupId)?.members ?? [])
+    .find(member => member.endpointId === remote.endpointId)
+  assert.ok(fallback !== undefined, 'the nameless endpoint is still a member')
+  assert.equal(fallback.kind, 'remoteBot', 'it is still a Bot, not a person')
+  assert.doesNotMatch(String(fallback.name ?? ''), /\d{3}/,
+    `a Bot with no published name never inherits a phone number: ${JSON.stringify(fallback)}`)
+})
+
+// 3. A SETTINGS CHANGE ON THE HUB MUST REACH THE OTHER MACHINE WITHOUT A MANUAL SYNC.
+//
+// The Hub already broadcasts `member.changed` with `kind: 'settings'`. The machine with the group
+// open must turn that notification into an authoritative roster/settings read, and the open room
+// must show the new name/notice/mode. The test does not call `syncRoster`: that would prove the
+// helper works, not that the product calls it.
+test('a settings change on the Hub reaches the other open machine', async (t) => {
+  const { alice, bob, workgroupId } = await invitedPair(t)
+  await until(() => roomOf(bob, workgroupId)?.members?.some(member => member.kind === 'remoteBot'),
+    { label: "Bob's initial roster" })
+  const updated = await alice.call('update-room', {
+    id: roomOf(alice, workgroupId).id,
+    name: '实时改名',
+    notice: '实时通知',
+    mode: 'everyone',
+  })
+  assert.equal(updated.ok, true, JSON.stringify(updated.error))
+  await until(() => roomOf(bob, workgroupId)?.name === '实时改名', {
+    label: "Bob's open room to receive the Hub settings notification",
+  })
+  const bobRoom = await bob.call('room', { id: roomOf(bob, workgroupId).id })
+  assert.equal(bobRoom.ok, true, JSON.stringify(bobRoom.error))
+  assert.equal(bobRoom.value.name, '实时改名')
+  assert.equal(bobRoom.value.notice, '实时通知')
+  assert.equal(bobRoom.value.mode, 'everyone')
+})
+
+// 4. A REMOTE BOT ANSWER MUST CARRY THE CALLER'S EXCHANGE, SO THE CALLER DOES NOT OPEN A SECOND ROUND.
+//
+// A local group awaits the member's turn in the same slot. A workgroup cannot await another machine
+// over the WSS cursor, so the call and answer need a stable exchange id. Without it the answer is
+// just another post: the caller cannot tell which slot it belongs to, the next speaker is chosen from
+// a new opener, and the observable order differs from the original.
+test("a remote Bot's answer is matched to the exchange that called it", async (t) => {
+  const { alice, bob, workgroupId } = await invitedPair(t)
+  const room = roomOf(alice, workgroupId)
+  assert.ok(room !== undefined)
+  const remote = (room.members ?? []).find(member => member.name === 'BobChief')
+  assert.ok(remote !== undefined, `Bob's Bot is in Alice's roster: ${JSON.stringify(room.members)}`)
+  assert.equal(remote.kind, 'remoteBot', 'Alice cannot run a turn for it')
+
+  // The call the round would send. This is the product's own bridge method, because the WSS and
+  // replay path are what the test is about; the round's slot is supplied the way `runRound` does.
+  const slot = { note: '@BobChief 帮我看一下', by: 'a', exchangeId: 'exchange-real-round' }
+  const delivered = await alice.wg.deliverRemote({ room, member: remote, round: { id: 'round-1' }, slot })
+  assert.equal(delivered.sent, true, JSON.stringify(delivered))
+
+  // Bob's machine receives the call and runs the Bot. Play the turn events the runtime would emit.
+  const bobRoom = roomOf(bob, workgroupId)
+  assert.ok(bobRoom !== undefined)
+  await until(() => (bob.followups ?? []).some(entry => String(entry.message?.source?.role ?? '') === 'room'),
+    { label: "Bob's called Bot to start a turn" })
+  const started = (bob.followups ?? []).find(entry => entry.message?.source?.role === 'room')
+  assert.equal(started.message.source.exchangeId, 'exchange-real-round',
+    'the called machine receives the caller exchange, not a fresh anonymous one')
+  const emit = async (sessionId, event) => {
+    for (const listener of bob.rt.ctx.listeners.get('session/event') ?? []) await listener({ id: sessionId }, event)
+  }
+  await emit(started.sessionId, { type: 'turn/start', data: { turn: 1 } })
+  await emit(started.sessionId, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '看过了，没问题' }] } } })
+  await emit(started.sessionId, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+
+  // Alice receives the line, and it points back at the exchange her round is waiting on.
+  await until(() => lineByText(alice, workgroupId, '看过了，没问题') !== undefined, {
+    label: "Alice to receive BobChief's answer",
+  })
+  const seen = lineByText(alice, workgroupId, '看过了，没问题')
+  assert.equal(seen.memberId, remote.id, 'the line belongs to the Bot that was called')
+  assert.equal(seen.exchangeId, 'exchange-real-round', 'and it points at the caller exchange')
+  assert.equal(seen.who, 'BobChief', 'the Bot keeps its name on the other machine')
+})
+
+// 5. THE BOT'S ROLE/INSTRUCTIONS STAY IN THE MEMBER PROMPT, THE WAY THE ORIGINAL GROUP DOES.
+//
+// The product does not need a new "role router": the Bot's identity prompt already carries `role`
+// and `instructions`, and the admin picks members with @Name. What must not happen is the workgroup
+// replacing that prompt with the relay-only one, or handing the member a different Bot's identity.
+test("a workgroup member's turn keeps its own Bot identity prompt", async (t) => {
+  const { alice, workgroupId } = await invitedPair(t)
+  const room = roomOf(alice, workgroupId)
+  // The identity section is rendered by the original `prompt.js` from `rt.selfOf`. The workgroup's
+  // `ownership.js` extends `selfOf` for a member Session; this asserts the contract the round uses.
+  const session = 'session-owner-probe'
+  alice.wg.registerSessionOwner(session, { kind: 'workgroup', workgroupId: room.id, botId: 'a', name: 'Chief' })
+  assert.equal(alice.rt.selfOf(session), 'a', 'a member Session resolves to its own Bot')
+  const section = alice.rt.ctx.sections.get('bot-identity')
+  const text = typeof section?.text === 'function' ? section.text({ agent: { id: session } }) : ''
+  assert.match(text, /You are Chief/, 'the Bot identity is the member prompt')
+  assert.match(text, /Your role: Boss/, 'and the role label is present')
+  assert.doesNotMatch(text, /only the relay/, 'a member is not told it is the relay')
+})
+
+
+// 6. THE COPIED ROUND, NOT A SECOND ORCHESTRATOR.
+//
+// This is the local half of the remote exchange, with no Hub: the round names a remote member via
+// `deliverRemote`, then the remote answer arrives through the same `receiveRemote` line path the
+// product uses. The round must keep the original slot order: only the member the admin named speaks,
+// and the admin answers the result. Two independent openers would be the drift the user reported.
+test('a remote answer is handled by the calling round, not by a second opener', async (t) => {
+  const { baseUrl } = await withHub(t)
+  const alice = await machine(t, { baseUrl, phone: ALICE, team: ALICE_TEAM, name: 'round-alice' })
+  const bob = await machine(t, { baseUrl, phone: BOB, team: BOB_TEAM, name: 'round-bob' })
+  await until(() => alice.wg.bridge.status().connected && bob.wg.bridge.status().connected, { label: 'both sockets' })
+  const created = await alice.call('create-room', {
+    name: '顺序回归',
+    members: [{ id: 'a', name: 'Chief', kind: 'localBot' }, { id: 'a2', name: 'Researcher', kind: 'localBot' }],
+  })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+  const workgroupId = created.value.hub.workgroupId
+  await alice.call('invite-member', { workgroupId, phone: BOB })
+  const incoming = await bob.call('group-invites', {})
+  await bob.call('answer-invite', { inviteId: incoming.value.incoming[0].inviteId, accept: true })
+  await bob.wg.bridge.joinWithPrimaryBot({ workgroupId })
+  await until(() => (roomOf(alice, workgroupId)?.members ?? []).some(member => member.name === 'BobChief'),
+    { label: "BobChief in Alice's roster" })
+
+  const room = roomOf(alice, workgroupId)
+  const admin = (room.members ?? []).find(member => member.id === room.adminId)
+  assert.equal(admin?.name, 'Chief', 'Alice\'s Chief is the owner Main Bot')
+  const remote = (room.members ?? []).find(member => member.name === 'BobChief')
+  assert.ok(remote !== undefined)
+
+  // A plain user message selects the admin, exactly as the original group's `admin` mode does.
+  assert.deepEqual(alice.wg.openingSpeakers(room, { text: '这版方案什么时候能看？' }).map(member => member.name),
+    ['Chief'], 'a plain message starts with the admin alone')
+
+  // The admin names Bob's Bot. That post is the opener the next slot is selected from.
+  const handoff = alice.wg.openingSpeakers(room, {
+    member: true,
+    botId: 'a',
+    text: '@BobChief 帮我看一下这个方向',
+  })
+  assert.deepEqual(handoff.map(member => member.name), ['BobChief'],
+    'the admin\'s @Name calls exactly Bob\'s Bot, as the original group does')
+  // Bob's Bot answers without @: a member post calls nobody; the caller (the admin) is not re-asked.
+  assert.deepEqual(alice.wg.openingSpeakers(room, {
+    member: true,
+    botId: remote.id,
+    text: '看过了，这个方向可行',
+  }).map(member => member.name), [], 'a member answer with no @ does not restart the admin')
+
+  // And the answer itself points at the exchange that called it, which is the identity the round
+  // uses to attach the reply to its slot rather than opening another opener.
+  const slot = { note: '@BobChief 帮我看一下这个方向', by: 'a', exchangeId: 'exchange-order-1' }
+  const delivered = await alice.wg.deliverRemote({ room, member: remote, round: { id: 'round-order-1' }, slot })
+  assert.equal(delivered.sent, true, JSON.stringify({ delivered, message: delivered?.error?.message, code: delivered?.error?.code }))
+  let call
+  await until(async () => {
+    const page = await alice.wg.hub.events({ workgroupId, afterSeq: 0 })
+    call = (page.events ?? page ?? []).find(event => event.payload?.call?.exchangeId === 'exchange-order-1')
+    return call !== undefined
+  }, { label: 'the call to carry the round exchange' })
+  assert.equal(call.payload.call.roundId, 'round-order-1', 'and the round id, so a late answer is attributable')
+})
+
+
+// 7. A RESTART KEEPS THE SAME LINES, THE SAME IDS AND THE SAME BOT ATTRIBUTION.
+//
+// The Hub is the durable record; a local room is a projection. A restart must replay what this
+// machine has not applied without duplicating what it already has. This closes the other half of
+// 「消息持久化」: a message is not persisted merely because it is on one screen at the moment it is
+// sent.
+test('both machines keep the workgroup history and Bot attribution across a restart', async (t) => {
+  const { baseUrl } = await withHub(t)
+  const aliceHomeRoot = mkdtempSync(join(tmpdir(), 'ds-bot-wg-restart-alice-'))
+  const bobHomeRoot = mkdtempSync(join(tmpdir(), 'ds-bot-wg-restart-bob-'))
+  const aliceHome = join(aliceHomeRoot, 'bot')
+  const bobHome = join(bobHomeRoot, 'bot')
+  mkdirSync(aliceHome, { recursive: true })
+  mkdirSync(bobHome, { recursive: true })
+  writeFileSync(join(aliceHome, 'state.json'), JSON.stringify(ALICE_TEAM))
+  writeFileSync(join(bobHome, 'state.json'), JSON.stringify(BOB_TEAM))
+
+  const open = async (home, phone) => {
+    const ctx = fakeContext()
+    const followups = []
+    Object.assign(ctx, {
+      llm: { listProviders: () => [] },
+      workspaceRegistry: {
+        get: () => undefined,
+        resolveByPath: async () => undefined,
+        create: async (path) => ({ id: `w-${Math.random().toString(16).slice(2)}`, path }),
+        archiveSession: async () => {},
+      },
+      sessionController: {
+        create: async () => ({ sessionId: `s-${Math.random().toString(16).slice(2)}` }),
+        resolveAgent: async sessionId => ({
+          agent: {
+            session: { id: sessionId },
+            followup: (message) => { followups.push({ sessionId, message }) },
+            cancel: () => {},
+          },
+        }),
+        selectModel: async () => {},
+        prompt: async ({ sessionId, content, source }) => {
+          followups.push({ sessionId, message: { content, source } })
+          return { accepted: true }
+        },
+        page: async () => ({ events: [] }),
+      },
+      sessionTitle: { rename: async () => {} },
+      sessions: { flush: async () => {} },
+    })
+    const rt = createRuntime(ctx, { home })
+    const wg = rt.workgroup
+    const call = (endpoint, payload) => wg.apiHandle(endpoint, payload)
+    const signedIn = await call('hub-login', { baseUrl, phone, password: PASSWORD })
+    assert.equal(signedIn.ok, true, `sign-in failed: ${JSON.stringify(signedIn.error)}`)
+    return { rt, wg, call, followups, close: async () => {
+      await wg.bridge.stop().catch(() => {})
+      await ctx.dispose()
+    } }
+  }
+
+  let alice = await open(aliceHome, ALICE)
+  let bob = await open(bobHome, BOB)
+  await until(() => alice.wg.bridge.status().connected && bob.wg.bridge.status().connected, { label: 'both sockets' })
+
+  const created = await alice.call('create-room', {
+    name: '重启回归',
+    members: [{ id: 'a', name: 'Chief', kind: 'localBot' }, { id: 'a2', name: 'Researcher', kind: 'localBot' }],
+  })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+  const workgroupId = created.value.hub.workgroupId
+  await alice.call('invite-member', { workgroupId, phone: BOB })
+  const incoming = await bob.call('group-invites', {})
+  await bob.call('answer-invite', { inviteId: incoming.value.incoming[0].inviteId, accept: true })
+  await bob.wg.bridge.joinWithPrimaryBot({ workgroupId })
+  await until(() => (roomOf(bob, workgroupId)?.members ?? []).some(member => member.name === 'Chief'),
+    { label: 'Bob to know the owner Bot' })
+
+  const typed = '重启前发的一句'
+  const sent = await alice.call('send-hub', { workgroupId, text: typed })
+  assert.equal(sent.ok, true, JSON.stringify(sent.error))
+  await until(() => lineByText(bob, workgroupId, typed) !== undefined, { label: 'Bob to see the typed line' })
+
+  // A Bot's answer through the real round path. `postToGroupSession` on its own only writes into the
+  // group Session (the relay is what makes it a log line); here the round is opened and answered,
+  // which is how the product mirrors a Bot's contribution to the Hub.
+  const botText = '重启前的 Bot 回答'
+  const aliceRoom = () => roomOf(alice, workgroupId)
+  alice.wg.roomInbox.set(aliceRoom().id, [{ text: '@Chief 回复一下', who: 'User' }])
+  const round = alice.rt.ctx.registeredTools.get('workgroup_relay').execute(
+    {}, { agent: { id: aliceRoom().id }, callId: 'restart-round', signal: new AbortController().signal },
+  )
+  const memberWaiter = async () => {
+    const deadline = Date.now() + 8000
+    for (;;) {
+      const found = [...alice.wg.roomWaiters.values()].find(entry => entry.roomId === aliceRoom().id && entry.memberId === 'a')
+      if (found !== undefined) return found
+      if (Date.now() > deadline) throw new Error('the restart round never asked Chief to speak')
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+  }
+  const chief = await memberWaiter()
+  const aliceEmit = async (event) => {
+    for (const listener of alice.rt.ctx.listeners.get('session/event') ?? []) await listener({ id: chief.sessionId }, event)
+  }
+  await aliceEmit({ type: 'turn/start', data: { turn: 1 } })
+  await aliceEmit({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: botText }] } } })
+  await aliceEmit({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await round.catch(() => {})
+  await until(() => lineByText(bob, workgroupId, botText) !== undefined, { label: 'Bob to see the Bot line' })
+
+  const beforeAlice = (roomOf(alice, workgroupId)?.log ?? []).filter(line => [typed, botText].includes(line.text))
+  const beforeBob = (roomOf(bob, workgroupId)?.log ?? []).filter(line => [typed, botText].includes(line.text))
+  assert.equal(beforeAlice.length, 2)
+  assert.equal(beforeBob.length, 2)
+
+  await alice.close()
+  await bob.close()
+  alice = await open(aliceHome, ALICE)
+  bob = await open(bobHome, BOB)
+  await until(() => alice.wg.bridge.status().connected && bob.wg.bridge.status().connected, { label: 'both sockets after restart' })
+  await until(() => (roomOf(alice, workgroupId)?.log ?? []).some(line => line.text === typed)
+    && (roomOf(bob, workgroupId)?.log ?? []).some(line => line.text === typed), { label: 'history after restart' })
+
+  const afterAlice = (roomOf(alice, workgroupId)?.log ?? []).filter(line => [typed, botText].includes(line.text))
+  const afterBob = (roomOf(bob, workgroupId)?.log ?? []).filter(line => [typed, botText].includes(line.text))
+  assert.equal(afterAlice.length, 2, 'Alice does not duplicate the replay')
+  assert.equal(afterBob.length, 2, 'Bob does not duplicate the replay')
+  assert.deepEqual(afterAlice.map(line => line.hubEventId).sort(), beforeAlice.map(line => line.hubEventId).sort(),
+    'the persisted Hub event ids are the same after a restart')
+  assert.deepEqual(afterBob.map(line => line.hubSeq).sort(), beforeBob.map(line => line.hubSeq).sort(),
+    'and the Hub seq is stable')
+  const botLine = afterBob.find(line => line.text === botText)
+  assert.equal(botLine.who, 'Chief', 'the Bot keeps its name after a restart')
+  assert.equal(botLine.memberId, (roomOf(bob, workgroupId)?.members ?? []).find(member => member.name === 'Chief')?.id,
+    'and its member identity is the same Bot, not the owner')
+})
+
+
+// 8. AN UNKNOWN BOT ENDPOINT GETS A BOT PLACEHOLDER, NEVER A PERSON'S PHONE.
+//
+// This is the failure mode behind 「同事 B 看到同事 A 的电话号码」: the roster had not yet resolved
+// the endpoint, so the line fell through to the sender's account row. A line explicitly marked with
+// `sender.botEndpointId` is a Bot by construction; the only safe unknown name is the endpoint id
+// (which the UI can label "Bot"), never the owner's phone.
+test('a Bot line with an unresolved endpoint never falls back to the owner phone', async (t) => {
+  const { alice, workgroupId } = await invitedPair(t)
+  const room = roomOf(alice, workgroupId)
+  assert.ok(room !== undefined)
+  const text = '这是无法解析 endpoint 的 Bot 行'
+  await alice.wg.receiveRemote({
+    workgroupId,
+    event: {
+      eventId: 'evt_unresolved_bot_probe',
+      seq: 999,
+      type: 'chat.message',
+      sender: {
+        userId: 'usr_the_owner',
+        botEndpointId: 'ep_not_in_the_roster',
+      },
+      payload: { text, senderName: 'Chief' },
+    },
+  })
+  const line = room.log.find(entry => entry.text === text)
+  assert.ok(line !== undefined, 'the line reached the room')
+  assert.equal(line.memberId, 'ep_not_in_the_roster', 'it is attributed to the Bot endpoint, not a resolved person')
+  assert.doesNotMatch(String(line.who), /\d{3}/, `a Bot never shows a phone: ${JSON.stringify(line)}`)
+  assert.equal(line.who, 'Chief', 'the published Bot name from the line wins over the account row')
+})

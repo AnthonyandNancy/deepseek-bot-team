@@ -36,6 +36,23 @@ export function install(rt) {
     if (clients.size > 0) publish('revision', { revision: state.revision })
   }
 
+  // The Workgroup domain keeps its own state file, so its saves are not `state.revision`. The panel
+  // needs the same push signal for its own room and member card; publishing it here keeps ONE
+  // browser transport (`/api/bot/feed`) instead of adding a second SSE/WebSocket route for one panel.
+  //
+  // `workgroupId` is optional: a save may touch several groups (a roster write, for example), and the
+  // window re-reads the open room and the Hub roster when this fires. `revision` is the workgroup
+  // file's shared counter, not the original team's.
+  rt.workgroupStateSaved = (payload = {}) => {
+    if (clients.size === 0) return
+    publish('workgroup', {
+      ...(payload.workgroupId === undefined ? {} : { workgroupId: payload.workgroupId }),
+      ...(payload.roomId === undefined ? {} : { roomId: payload.roomId }),
+      ...(Number.isFinite(payload.revision) ? { revision: payload.revision } : {}),
+      ...(payload.kind === undefined ? {} : { kind: payload.kind }),
+    })
+  }
+
   let liveTimer
   const live = () => {
     if (clients.size === 0 || liveTimer !== undefined) return

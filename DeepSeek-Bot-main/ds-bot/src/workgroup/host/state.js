@@ -100,12 +100,23 @@ export function install(wg) {
     return loading
   }
 
-  const save = () => {
+  const save = (context = {}) => {
     if (stopped) return writing
     // `wg.state` is the one object the rest of the domain mutates (ownership index,
     // groups), so it — not a local binding — is what gets written.
     const current = wg.state
     current.revision += 1
+    // The original feed is the browser's one live transport; tell it that this file moved. The
+    // domain's save has already mutated the record by now, so the receiver can re-read `room` or
+    // `group-members` immediately. A failure to notify must never fail the save.
+    try {
+      rt.workgroupStateSaved?.({
+        revision: current.revision,
+        ...(typeof context.workgroupId === 'string' ? { workgroupId: context.workgroupId } : {}),
+        ...(typeof context.roomId === 'string' ? { roomId: context.roomId } : {}),
+        ...(typeof context.kind === 'string' ? { kind: context.kind } : {}),
+      })
+    } catch { /* a window refresh is best effort */ }
     const snapshot = JSON.stringify(current)
     writing = writing.then(async () => {
       const temp = `${statePath}.${process.pid}.tmp`

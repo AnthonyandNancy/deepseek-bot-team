@@ -190,25 +190,29 @@ test('@all calls every member, one at a time', async (t) => {
 })
 
 test('a [PASS] reply stays out of the room log', async (t) => {
-  const { wg, answer, beginRound, stop } = start()
+  const { wg, answer, beginRound, stop, untilWaiter } = start()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '闲聊')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  await answer(wg.workgroupOf(room.id).sessions['bot-a'], '[PASS]')
+  // Answer the turn that is really listening. A fixed sleep can land after the Session exists but
+  // before its waiter is registered; the answer then goes nowhere and this test waits 240 s for a
+  // timeout it was supposed to avoid.
+  const sessionId = await untilWaiter('bot-a')
+  await answer(sessionId, '[PASS]')
   const result = JSON.parse(await running)
   assert.equal(result.replies.length, 0, 'nothing was posted')
   assert.ok(result.passed.includes('Writer'), 'and the member is recorded as having passed')
 })
 
 test('stopping a round cancels the member turn and drops its late reply', async (t) => {
-  const { wg, answer, beginRound, cancelled, stop } = start()
+  const { wg, answer, beginRound, cancelled, stop, untilWaiter } = start()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '做点慢活')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const sessionId = wg.workgroupOf(room.id).sessions['bot-a']
-  assert.ok(sessionId !== undefined)
+  // `sessionFor` creates the member's Session BEFORE `roomWaiters` gets its entry. A fixed sleep
+  // sometimes landed inside that gap, so the stop found nothing to cancel. Wait for the waiter —
+  // the same condition the other round tests use — and stop that exact turn.
+  const sessionId = await untilWaiter('bot-a')
   const stopped = await wg.stopRound(room.id)
   assert.equal(stopped, true, 'stopRound reports that it stopped something')
   assert.ok(cancelled.some(entry => entry.sessionId === sessionId), 'the member turn was cancelled')

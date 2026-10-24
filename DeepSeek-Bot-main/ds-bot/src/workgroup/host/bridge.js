@@ -316,7 +316,14 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
               workgroupId,
               seq: frame.seq,
               type: 'chat.message',
-              sender: { userId: auth?.hubUserId, deviceId: auth?.deviceId },
+              // Keep the Bot authorship the Hub stored. Rebuilding this with the person alone made a
+              // Bot's mirrored answer look like something the USER typed here, so `receiveRemote`
+              // opened a second round for it instead of treating it as the member's contribution.
+              sender: {
+                userId: auth?.hubUserId,
+                deviceId: auth?.deviceId,
+                ...(sent.botEndpointId === undefined ? {} : { botEndpointId: sent.botEndpointId }),
+              },
               payload: sent.payload,
               createdAt: new Date(now()).toISOString(),
             }, { mine: true })
@@ -594,10 +601,14 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
 
     // Sends a message. The Hub gets it first: a message that reaches the local log but not the Hub
     // would be invisible to everyone else, which is worse than a send that fails visibly.
-    async send({ workgroupId, text, attachments, botEndpointId, eventId, call }) {
+    async send({ workgroupId, text, attachments, botEndpointId, eventId, call, exchangeId }) {
       const payload = {
         text: String(text ?? ''),
         ...(attachments === undefined ? {} : { attachments }),
+        // The answer to a remote call carries the caller's exchange. It is payload data, not a
+        // transport field: the Hub stores it with the event and replays it after a reconnect, and
+        // an attachment or a replayed ack goes through the same path.
+        ...(exchangeId === undefined ? {} : { exchangeId: String(exchangeId) }),
         // A `call` is the control payload that asks another machine to run a called member's turn
         // (`deliverRemote`). It is carried on an ordinary `chat.message` so it uses the ordering,
         // the replay and the dedup the Hub already gives a message — and it carries no text,
@@ -964,7 +975,7 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     // What it does NOT do: run anything on this machine, wait for an answer, or pretend the member
     // replied. The model work belongs to the called member's device; the answer comes back as an
     // ordinary group line through `receiveRemote` and `mirrorLine`.
-    async deliverRemote({ room, member, slot }) {
+    async deliverRemote({ room, member, round, slot }) {
       if (room === undefined || member === undefined) return { skipped: 'no-member' }
       const hubWorkgroupId = room.hubWorkgroupId
       // A group that is not on the Hub has no remote members: `kind !== 'localBot'` can only exist
@@ -993,6 +1004,18 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
             // reason the called member knows what it was asked.
             ...(slot?.note === undefined ? {} : { note: String(slot.note) }),
             ...(caller === undefined ? {} : { fromName: caller }),
+            // THE CALL AND ITS ANSWER ARE ONE EXCHANGE.
+            //
+            // A local group keeps a member's slot open while `roomTurn` awaits the reply. A remote
+            // member's turn runs on another machine, so that promise cannot cross the Hub. The
+            // exchange id can: the called machine uses it as the turn's `exchangeId`, and the reply
+            // line carries it back. The caller can then attach the answer to the exact slot that
+            // asked, instead of treating it as an unrelated new opener and re-running the round's
+            // speaker choice. Without this a workgroup's order drifts from the original group's.
+            ...(slot?.exchangeId === undefined ? {} : { exchangeId: String(slot.exchangeId) }),
+            // A slot belongs to exactly one running round. Prefer an explicit slot id; fall back to
+            // the caller's round record, which is how `runRound` invokes this seam.
+            ...((slot?.roundId ?? round?.id) === undefined ? {} : { roundId: String(slot?.roundId ?? round.id) }),
             groupName: room.name,
             // The room id is this MACHINE's name for the group, so it means nothing on another
             // machine. `workgroupId` is what both sides share.

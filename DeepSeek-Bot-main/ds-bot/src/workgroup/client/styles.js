@@ -64,6 +64,7 @@ export const WG_CSS = `
 @media (prefers-reduced-motion:reduce){.bt-wg-working-line{animation:none}}
 .bt-wg-line{font-size:14px;line-height:21px;color:var(--bt-ink,#141414);overflow-wrap:anywhere}
 .bt-wg-line-who{font-weight:600;color:var(--bt-ink-2,rgba(20,20,20,.6))}
+.bt-wg-line-owner{display:inline-block;margin-inline-start:5px;padding:0 4px;border-radius:5px;background:var(--bt-hover,rgba(119,119,119,.09));font-size:10px;line-height:15px;font-weight:400;color:var(--bt-ink-3,rgba(20,20,20,.36));vertical-align:1px}
 .bt-wg-at{color:var(--bt-accent,#4d6bfe);font-weight:500;border-radius:4px}
 .bt-wg-at-all{background:var(--bt-tag-bg,rgba(20,20,20,.06));padding:0 3px}
 .bt-wg-line-note{font-size:12px;line-height:18px;color:var(--bt-ink-3,rgba(20,20,20,.36));font-style:italic}
