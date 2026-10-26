@@ -510,13 +510,84 @@ test('subscribing narrows the fan-out to the named groups', async (t) => {
     'an unsubscribed group must not be pushed')
 })
 
-test('the four memory events are accepted by the closed set but never counted as readable', async () => {
+test('a memory.change fans out on the existing sequence and never counts as unread', async (t) => {
+  const { hub, alice, bob, workgroupId } = await setup(t)
+  const a = connect(hub, alice)
+  const b = connect(hub, bob)
+  t.after(() => Promise.all([a.close(), b.close()]))
+  await a.hello()
+  await b.hello()
+
+  const before = await hub.get(`/v1/workgroups/${workgroupId}`, { token: bob.token })
+  assert.equal(before.status, 200)
+  const unreadBefore = before.body.unreadCount
+
+  const eventId = 'mev-ws-1'
+  const from = a.cursor
+  a.send({
+    type: 'memory.change',
+    workgroupId,
+    eventId,
+    botEndpointId: 'ep_alice_writer',
+    payload: {
+      roomKey: workgroupId,
+      op: 'add',
+      topic: null,
+      before: null,
+      after: '- Ship on Friday',
+      actor: { id: 'bot-a', name: 'Writer' },
+      at: '2026-10-24T00:00:00.000Z',
+    },
+  })
+  const ack = await a.next(message => message.type === 'ack.ok' && message.eventId === eventId, { label: 'memory ack', from })
+  assert.equal(Number.isInteger(ack.seq), true, 'the Hub assigns an integer seq from the shared log')
+  assert.equal(ack.duplicate, false)
+
+  const received = await b.next(message => message.type === 'event' && message.event.eventId === eventId)
+  assert.equal(received.workgroupId, workgroupId)
+  assert.equal(received.event.type, 'memory.change')
+  assert.equal(received.event.seq, ack.seq)
+  assert.equal(received.event.payload.after, '- Ship on Friday')
+  assert.equal(received.event.sender.botEndpointId, 'ep_alice_writer', 'the Hub keeps the Bot identity like a chat line')
+
+  const after = await hub.get(`/v1/workgroups/${workgroupId}`, { token: bob.token })
+  assert.equal(after.body.unreadCount, unreadBefore, 'a memory change is not a message and must not raise the badge')
+
   const { EVENT_TYPES, READABLE_EVENT_TYPE } = await import('../src/workgroups/service.js')
-  for (const type of ['memory.proposed', 'memory.created', 'memory.corrected', 'memory.deleted']) {
-    assert.equal(EVENT_TYPES.has(type), true, `${type} must be in the closed event set`)
-    assert.notEqual(type, READABLE_EVENT_TYPE)
-  }
-  // Only a chat message is unread. This is the exact query `workgroups.get` counts, so a future
-  // memory type that accidentally became readable would make the badge climb without a message.
+  assert.equal(EVENT_TYPES.has('memory.change'), true)
+  assert.equal(EVENT_TYPES.has('memory.proposed'), false, 'G6R keeps exactly one memory event type')
+  assert.equal(EVENT_TYPES.has('memory.created'), false)
+  assert.equal(EVENT_TYPES.has('memory.corrected'), false)
+  assert.equal(EVENT_TYPES.has('memory.deleted'), false)
   assert.equal(READABLE_EVENT_TYPE, 'chat.message')
+})
+
+test('memory.change is refused for a stranger and for a missing group, and writes nothing', async (t) => {
+  const hub = await startHub()
+  t.after(() => hub.close())
+  const alice = await person(hub, { phone: PHONE_A })
+  const bob = await person(hub, { phone: PHONE_B })
+  const { workgroupId } = await groupWith(hub, { owner: alice })
+  const b = connect(hub, bob)
+  t.after(() => b.close())
+  await b.hello()
+
+  const from = b.cursor
+  b.send({
+    type: 'memory.change', workgroupId, eventId: 'mev-outside',
+    payload: { roomKey: workgroupId, op: 'add', topic: null, before: null, after: '- not allowed', actor: { id: 'user', name: 'user' } },
+  })
+  const refused = await b.next(message => message.type === 'error', { from })
+  assert.equal(refused.code, 'workgroup/not-found')
+  assert.equal(b.ws.readyState, WebSocket.OPEN)
+
+  b.send({
+    type: 'memory.change', workgroupId: 'wg_ghost', eventId: 'mev-ghost',
+    payload: { roomKey: 'wg_ghost', op: 'add', topic: null, before: null, after: '- nowhere', actor: { id: 'user', name: 'user' } },
+  })
+  const ghost = await b.next(message => message.type === 'error' && message !== refused, { from })
+  assert.equal(ghost.code, 'workgroup/not-found')
+
+  const pulled = await hub.get(`/v1/workgroups/${workgroupId}/events`, { token: alice.token })
+  assert.equal(pulled.body.events.length, 0, 'a refused memory.change is not stored')
 })

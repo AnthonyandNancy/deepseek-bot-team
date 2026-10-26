@@ -239,11 +239,11 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       void Promise.resolve(wg.onTaskEvent?.({ workgroupId, event }))
         .catch(error => logger?.warn?.('ds-bot: task event %s not applied: %s', event.eventId, error?.message ?? error))
     }
-    // A memory event is a signal to re-read the Hub, never a payload to merge. The cache is a
-    // projection for prompt freezing; the Hub stays authoritative.
-    if (typeof event.type === 'string' && event.type.startsWith('memory.')) {
+    // G6R: one change the ORIGINAL memory engine made on another machine. The adapter applies it
+    // through that same engine; this is not a second store being merged.
+    if (event.type === 'memory.change') {
       void Promise.resolve(wg.onMemoryEvent?.({ workgroupId, event }))
-        .catch(error => logger?.warn?.('ds-bot: memory event %s not applied: %s', event.eventId, error?.message ?? error))
+        .catch(error => logger?.warn?.('ds-bot: memory change %s not applied: %s', event.eventId, error?.message ?? error))
     }
     emit('event', { workgroupId, event })
     // Told to the Hub so a reconnect does not replay what is already on screen. Best effort: a
@@ -340,7 +340,11 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
           // message twice), so the sender's own line has to be applied here or the author never sees
           // what they wrote. `apply` deduplicates by `eventId`, so a replay of the same event — from
           // a sync after a restart, say — still lands once.
-          if (sent !== undefined && Number.isFinite(frame.seq) && frame.duplicate !== true) {
+          // The ack compensation below is chat's, not every frame's. A memory.change was already
+          // applied by the original engine on this machine; turning its payload into a chat.message
+          // would draw an empty group line.
+          const isChat = sent !== undefined && (sent.frameType === undefined || sent.frameType === 'chat.message')
+          if (isChat && Number.isFinite(frame.seq) && frame.duplicate !== true) {
             void apply(workgroupId, {
               eventId: frame.eventId,
               workgroupId,
@@ -674,7 +678,7 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
     // Returns once the frame is on the wire (or queued). The Hub's answer arrives as a
     // `task.ok`/`error` frame through `on(...)`; this call does not wait for it, because the whole
     // point of the outbox is that the answer may arrive after a restart.
-    async sendEvent({ workgroupId, frameType, payload, envelope, eventId }) {
+    async sendEvent({ workgroupId, frameType, payload, envelope, eventId, botEndpointId }) {
       const entry = stateOf(workgroupId)
       const id = eventId ?? envelope?.eventId ?? newEventId()
       const pending = {
@@ -682,6 +686,7 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
         frameType,
         payload,
         ...(envelope === undefined ? {} : { envelope }),
+        ...(botEndpointId === undefined ? {} : { botEndpointId }),
         queuedAt: now(),
       }
       entry.outbox.push(pending)

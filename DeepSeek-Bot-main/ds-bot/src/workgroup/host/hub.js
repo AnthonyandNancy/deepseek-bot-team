@@ -603,48 +603,6 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/lease`, { method: 'GET', token })
     },
 
-    // ── group memory (G6) ─────────────────────────────────────────────────────────
-    // One thin method per Hub route. The Hub is authoritative; these calls are the only way a
-    // machine reads or changes shared memory, and the local projection is refreshed from them.
-    async memories({ workgroupId }) {
-      const token = await ensureAccess()
-      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/memories`, { method: 'GET', token })
-    },
-    async searchMemories({ workgroupId, query }) {
-      const token = await ensureAccess()
-      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/memories/search?q=${encodeURIComponent(String(query ?? ''))}`, { method: 'GET', token })
-    },
-    async createMemory({ workgroupId, type, content, sourceRefs, acl, expiresAt }) {
-      const token = await ensureAccess()
-      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/memories`, {
-        body: {
-          type, content,
-          ...(sourceRefs === undefined ? {} : { sourceRefs }),
-          ...(acl === undefined ? {} : { acl }),
-          ...(expiresAt === undefined ? {} : { expiresAt }),
-        },
-        token,
-      })
-    },
-    async correctMemory({ workgroupId, memoryId, content, sourceRefs, acl, expectedVersion }) {
-      const token = await ensureAccess()
-      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/memories/${encodeURIComponent(memoryId)}/correct`, {
-        body: {
-          content,
-          ...(sourceRefs === undefined ? {} : { sourceRefs }),
-          ...(acl === undefined ? {} : { acl }),
-          expectedVersion,
-        },
-        token,
-      })
-    },
-    async deleteMemory({ workgroupId, memoryId, expectedVersion }) {
-      const token = await ensureAccess()
-      return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/memories/${encodeURIComponent(memoryId)}/delete`, {
-        body: { expectedVersion },
-        token,
-      })
-    },
     // Only the READ is here. Taking and releasing a lease happens over the socket
     // (`bridge.acquireLease`), because a round commits while it runs and the fence has to be checked on
     // the connection the round is already using. An HTTP acquire existed for a while and had no caller

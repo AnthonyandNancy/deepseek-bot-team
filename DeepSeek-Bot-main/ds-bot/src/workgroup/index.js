@@ -18,8 +18,8 @@ import * as handoffs from './host/handoffs.js'
 import * as roundState from './host/round-state.js'
 import * as groups from './host/groups.js'
 import * as hub from './host/hub.js'
-import * as memories from './host/memories.js'
 import * as bridge from './host/bridge.js'
+import * as memorySync from './host/memory-sync.js'
 import * as upgrade from './host/upgrade.js'
 import * as channel from './host/channel.js'
 
@@ -40,7 +40,7 @@ import * as channel from './host/channel.js'
 // `handoffs` installs BEFORE groups, the same order the original uses (`index.js`: handoffs, then
 // groups): groups calls `closeWork` when a round that a post waited on ends, so the ledger must
 // already exist. It needs only `wg.state` and this domain's maps, so nothing else constrains it.
-const WG_MODULES = [state, ownership, tasks, taskRunner, handoffs, roundState, groups, hub, memories, bridge, upgrade, channel]
+const WG_MODULES = [state, ownership, tasks, taskRunner, handoffs, roundState, groups, hub, bridge, memorySync, upgrade, channel]
 
 export function installWorkgroup(rt) {
   if (rt === undefined || rt === null) throw new Error('ds-bot: installWorkgroup needs the runtime')
@@ -74,6 +74,9 @@ export function installWorkgroup(rt) {
   // domain, and the reason is visible in the diagnostics log.
   try {
     for (const module of WG_MODULES) module.install(wg)
+    // The original memory engine reports every completed write through this observer. One indirection
+    // so a domain that was not installed yet, or has been torn down, is simply no observer.
+    rt.onMemoryWritten = change => { void rt.workgroup?.onMemoryWritten?.(change) }
   } catch (error) {
     delete rt.workgroup
     rt.warn?.('ds-bot: the Workgroup domain did not install; the local team keeps working: %s', error?.message ?? error)

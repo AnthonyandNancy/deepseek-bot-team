@@ -87,7 +87,7 @@ export async function openWorkgroup(id) {
 const FEED_PATH = 'api/bot/feed'
 const liveListeners = new Set()
 let liveSource
-const listenLive = (fn) => {
+export const listenLive = (fn) => {
   liveListeners.add(fn)
   if (liveSource === undefined && typeof EventSource === 'function') {
     liveSource = new EventSource(FEED_PATH)
@@ -95,11 +95,6 @@ const listenLive = (fn) => {
     liveSource.addEventListener('workgroup', (event) => {
       let payload = {}
       try { payload = JSON.parse(event.data) } catch { /* a malformed frame is just a refresh */ }
-      // A memory change is a signal to re-read the Hub, not a payload to merge. The settings card
-      // listens for this and re-reads `memory-list`; no second transport is introduced.
-      if (payload.kind === 'memory' && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
-        window.dispatchEvent(new CustomEvent('workgroup:memory', { detail: { workgroupId: payload.workgroupId } }))
-      }
       notify(payload)
     })
     liveSource.addEventListener('revision', () => notify({ kind: 'revision' }))

@@ -6,7 +6,7 @@
 - 现行计划：[`docs/superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md`](../../superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md)
 - **被否决方案**：`feat/g6-group-memory` 分支（10 个提交）与
   `docs/superpowers/plans/2026-10-26-g6-group-memory.md`。保留为反例，**不得 merge、不得继续实施**。
-- **状态：G6R 尚未开工。** 本文是纠偏交接，不是执行记录。
+- **状态：G6R 自动化已完成；本文保留为当时的纠偏指令，执行记录见 `EVIDENCE-MATRIX.md` 与 `ROUND-LOG.md`。**
 
 ---
 

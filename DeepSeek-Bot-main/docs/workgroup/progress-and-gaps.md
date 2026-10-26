@@ -2,7 +2,7 @@
 # 进度台账与缺口登记
 
 - 日期：2026-10-22
-- 水位：**G6 原方案已被否决，G6R 纠偏待开工**。原版群记忆引擎（`groups/<roomId>/`、成员校验、回顾、面板、归档）在 `main` 上已复用；缺的是跨机传输。G4-1/5/6、G4-T20、G5-T12/N3/T14、G6-M1 仍待人工，未发版
+- 水位：**G6 原方案已被否决；G6R 自动化已完成，人工项仍 BLOCKED**。原版群记忆引擎（`groups/<roomId>/`、成员校验、回顾、面板、归档）是唯一实现，Hub 只传输 `memory.change`。G4-1/5/6、G4-T20、G5-T12/N3/T14、G6-M1 仍待人工，未发版
 - 2026-10-23 补：**群内 Bot 交接**（方案 §5.1 的 `host/handoffs.js` 复制件）此前缺失，现已补上；属 G1 复制缺口，非 G5 范围
 - 2026-10-25 补：**旧群 lead 回填 + 发布包漏文件** 已闭环，属 G4/G5 已交付范围的缺陷，**不新开阶段**；当时的下一步是 G6，G6 现见 `g6/ROUND-LOG.md`
 
@@ -19,7 +19,7 @@
 | G4/G5 后补缺陷（lead 回填、发布包） | **已闭环（自动部分）** | `workgroup-membership.test.js` 18–22、`package-files.test.js`；ds-bot 1131 pass / 1 skip / 0 fail，hub 268 pass | app 安装副本重装与重启待维护者执行 |
 | G4/G5 修补轮（轮次持久化、对账、设置版本、任务幂等、Stop 持久、全量门禁） | **已闭环（自动部分）** | `docs/workgroup/gates.md` 的「G4/G5 修补轮」；人工项仍 BLOCKED | 不改阶段水位，不虚报人工结论 |
 | G6 群记忆（旧方案） | **已否决** | `g6/ROUND-LOG.md`（历史）；新建 `group_memories`、`memory-*` 端点与独立 UI，违反复制优先 | 保留为反例，不 merge |
-| G6R 群记忆跨机传输 | **未开工** | `docs/superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md`、`g6r/DESIGN-COPY-FIRST.md` | 复用原版引擎；G6-M1 待人工 |
+| G6R 群记忆跨机传输 | **自动化通过；人工 BLOCKED** | `g6r/EVIDENCE-MATRIX.md`、`g6r/ROUND-LOG.md` | 复用原版引擎；G6-M1 待两台真机 |
 | 人工验收 | 待执行 | `manual-checklist.md` | 由维护者执行；G6-M1 已加入 |
 | 发版 | 未执行 | `ds-bot` 源码 0.2.3；未发版 | 需求明确不发版 |
 
@@ -472,7 +472,7 @@ ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
 | 8 | 手机号未经验证，只是登录名 | 认证方式定为手机号 + 密码，无短信 | 源仓库已决定 | 长期 |
 | 9 | **门禁 1（两台真机）与门禁 6（观感对照）无自动化证据** | 只能人工判定 | 维护者 | 交付前 |
 | 10 | ~~附件只到「聊天附件」~~ **已做**：`artifacts` 表 + `/v1/artifacts/uploads`、`/v1/artifacts/:id/download`、`/v1/tasks/:id/artifacts` | G5 完成；与 G4 的 `attachments` 并存不合并 | 已定 | 已关闭 |
-| 11 | ~~跨用户 Bot 委派/审批、`round_leases`~~ **已做**（G5）；**群记忆跨机传输仍未做**：原版引擎已有，缺的是把本机变更同步到其他机器 | 原版有引擎、无传输 | 已定 | G6R |
+| 11 | ~~跨用户 Bot 委派/审批、`round_leases`~~ **已做**（G5）；**群记忆跨机传输自动化已做**：原版引擎 + `memory.change`，人工项 G6-M1 仍 BLOCKED | 原版有引擎、无传输 | 已定 | G6R |
 | 12 | ~~`workgroup_deliverRemote` 的 Bot 侧执行未接~~ **已做**：`task.request` 到达后由 B 本机 `task-runner.js` 承接，经 B 本人的审批 | G5 门禁 1/2 的核心 | 已定 | 已关闭 |
 | 13 | 面板的成员列表在 Hub 离线时为空（不缓存） | 避免把过期名单当成事实；离线仍可看日志 | 本轮决定 | 需要时加缓存 |
 | 14 | 附件选择用浏览器 `FileReader`，只在客户端可用；宿主侧无独立上传入口 | 与 G3 一样，文件由 UI 提供 | 本轮决定 | 需要 CLI 上传时 |

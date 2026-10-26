@@ -1,8 +1,8 @@
 # G6R 轮次日志
 
-- 分支：`feat/g6r-group-memory-sync`（待创建）
-- 起点：`main` = `1a022df docs(workgroup): add the G6 group memory plan and handoff`
-- 状态：**未开工**
+- 分支：`feat/g6-group-memory`（原地改造）
+- 起点：`424ea46 docs(workgroup): add the in-place G6R conversion instruction`
+- 状态：**自动化完成；人工项 BLOCKED**
 - 口径优先级：用户需求 > `g6r/NEXT-INSTRUCTION.md` 的已定口径 > 技术方案 > g0–g5 历史文档
 
 ## 0. 纠偏的由来
@@ -57,31 +57,47 @@
 → 另一台机器 `rt.applyRemoteMemoryChange` → 原版写入路径。详见
 `docs/workgroup/g6r/DESIGN-COPY-FIRST.md`。
 
-## 3. 任务与提交
+## 3. 任务与真实结果
 
-> 实施后在此表逐行填写真实提交与测试结果。**未实施前不得填写。**
+> 本轮在同一工作树原地完成；提交号在提交后回填。测试数字都是本轮实际运行的结果。
 
-| Task | 内容 | 提交 | 证据 |
-|---|---|---|---|
-| 1 | 复制优先硬规则（`AGENTS.md`、`CONTRIBUTING.md`） | 待填 | 待填 |
-| 2 | 纠正文档口径 | 待填 | 待填 |
-| 3 | 新写登记表 | 待填 | 待填 |
-| 4 | `rt.memoryRoomOf` 接缝 | 待填 | 待填 |
-| 5 | 原版读/回顾覆盖工作群 | 待填 | 待填 |
-| 6 | `rt.onMemoryWritten` 观测 | 待填 | 待填 |
-| 7 | Hub `memory.change` 类型与帧处理器 | 待填 | 待填 |
-| 8 | 发送端 `memory-sync.js` | 待填 | 待填 |
-| 9 | 接收端 `applyRemoteMemoryChange` | 待填 | 待填 |
-| 10 | bridge 分发 + ack 聊天补偿收敛 | 待填 | 待填 |
-| 11 | 删除工作群归档 | 待填 | 待填 |
-| 12 | 两机传播 | 待填 | 待填 |
-| 13 | 文档与证据 | 待填 | 待填 |
+| Task | 内容 | 结果 |
+|---|---|---|
+| 1–3 | 复制优先规则、口径纠正、新写登记表 | 仓库既有文档；本轮把 diff-manifest 中 4 条已删除的平行实现移出“新写”表 |
+| 4 | `rt.memoryRoomOf` 接缝 | 保留（G6 已做对）；`workgroup-memory-room.test.js` 通过 |
+| 5 | 原版读/回顾覆盖工作群 | 保留 `roomIdOf` 与 `agent/status` 两处接缝；`bot-memory` 段测试通过 |
+| 6 | `rt.onMemoryWritten` 观测 | 新增 `reportWrite`；原版 59 条既有断言未改，新增 observer 用例通过 |
+| 7 | Hub `memory.change` 类型与帧处理器 | `EVENT_TYPES` 收敛为一类；`hub/test/ws-events.test.js` 扇出/未读测试通过 |
+| 8 | 发送端 `memory-sync.js` | 新文件；上传过滤、roomKey、endpoint 身份测试通过 |
+| 9 | 接收端 `applyRemoteMemoryChange` | 走原版 `queued`/`writable`/journal；幂等与离群拒绝通过 |
+| 10 | bridge 分发 + ack 聊天补偿收敛 | 精确分发 `memory.change`；ack 仅 chat 走补偿；回归测试已验红绿 |
+| 11 | 删除工作群归档 | 原版 `archiveGroupMemory` 调用保留；单机归档测试通过 |
+| 12 | 两机传播 | 两台 `createRuntime` + 真 Hub：A 原版 `remember` → B 原版 `memory-view`；B 本人离群后收不到 |
+| 13 | 文档与证据 | 本文件与 `EVIDENCE-MATRIX.md` 按真实输出更新；人工项保持 BLOCKED |
 
 ## 4. 计划偏差登记
 
-> 实施中出现偏差时在此登记：哪一步、为什么、谁确认。未实施前为空。
+### D1 — 远端 actor 身份必须使用 Hub endpoint，不能用对方本机 Bot id
 
-（无）
+- **原计划写法**：接收端 `writable(groupScope(roomId), actor)`，`actor` 就是事件里的
+  `{ id: 'bot-a', name: 'Writer' }`。
+- **实际 blocker**：`bot-a` 是 A 机器的本地 Bot id；B 机器没有这个 id，原版 `writable()` 会把它判成
+  “已删除的 Bot”（`rt.botOf(id) === undefined`）。两机测试因此收不到条目。
+- **偏差**：`memory.change` 帧携带 Hub 稳定身份 `botEndpointId`（与既有 `chat.message` 相同字段）；
+  接收端用 `event.sender.botEndpointId` 在本机 roster 中解析成员。解析不到就丢弃。`applyRemoteMemoryChange`
+  先验证该成员仍在本群；随后以原版 USER 身份写入（面板用户路径），把远端 Bot 名保留在 journal/by 中。
+- **没有放宽的语义**：本群成员检查仍在；本机已删除的群仍由原版 `writable()` 拒绝；容量、条目格式、
+  凭据拒收、journal、快照失效全部沿用原版。
+- **确认**：用户本轮要求按复制的原版引擎落地，并明确“业务语义一律沿用原版”；此偏差是让协议能表达
+  “跨机是谁写的”，不新增记忆语义。
+
+### D2 — ack 回归测试必须观察 `receiveRemote`，不能只看日志行数
+
+- **原计划写法**：ack 后 `room.log.length` 不变。
+- **实际情况**：旧 bug 构造的空 `chat.message` 会被 `receiveRemote` 的空文本规则拒掉，日志行数仍不变，
+  该断言抓不到 bug。
+- **偏差**：回归测试同时 spy `wg.receiveRemote`，断言 memory ack 调用 0 次；临时移除 `isChat` guard 时
+  得到 RED（2≠0），恢复后 GREEN。
 
 ## 5. 未解决与人工项
 

@@ -49,14 +49,14 @@ const emptyState = () => ({
   // not in the original's `state.works`, so one domain's hand-offs can never be read as the
   // other's.
   works: {},
+  // workgroupId -> { lastSentAt, lastAppliedAt, applied }. Diagnostics for the G6R transport. The
+  // idempotency set itself belongs to the original memory engine (memory/applied.json), because a
+  // remote event can arrive before this domain's state file is first written.
+  memorySync: {},
   // roundId -> the obligations of a round that has not finished. Round objects hold signals and
   // promise resolvers that cannot be serialized; this projection holds only what a restarted
   // coordinator needs to find the answer on the Hub and decide whether the round may continue.
   rounds: {},
-  // workgroupId -> { entries, fetchedAt }. A cache of the Hub's authoritative group memory, used
-  // to freeze a prompt. It is never merged into another machine's state and never consulted by the
-  // memory panel instead of the Hub.
-  memories: {},
 })
 
 // Only what this domain understands is kept; an unknown or older shape resets to
@@ -65,7 +65,7 @@ function adopt(raw) {
   if (raw === null || typeof raw !== 'object' || raw.version !== WG_STATE_VERSION) return emptyState()
   const state = emptyState()
   if (Number.isFinite(raw.revision)) state.revision = raw.revision
-  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'taskRuns', 'endpointBots', 'works', 'rounds', 'memories']) {
+  for (const key of ['workgroups', 'links', 'sessionOwners', 'tasks', 'taskRequests', 'taskOutbox', 'taskRuns', 'endpointBots', 'works', 'memorySync', 'rounds']) {
     const value = raw[key]
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) state[key] = value
   }

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { apply } from '../index.js'
+import { createRuntime } from '../index.js'
 import {
   MEMORY_LIMITS, addLink, cleanEntry, cleanTopic, formatEntry, insertEntry, looksLikeKey,
   looksSecret, matchEntries, parseAsk, parseMemory, parseReview, reviewEntries, removeLink, splitMeta, writtenIn,
@@ -159,7 +159,7 @@ function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-')), replies =
     if (options.path === '/api/bot') route = options
     return register(options)
   }
-  apply(ctx, { home, ...config })
+  const rt = createRuntime(ctx, { home, ...config })
   const call = async (endpoint, payload) => {
     const response = await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
     return response.json()
@@ -172,7 +172,7 @@ function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-')), replies =
     await ctx.dispose()
     if (!keep) rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { ctx, home, call, tool, section, read, journal, requests, stop }
+  return { ctx, rt, home, call, tool, section, read, journal, requests, stop }
 }
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 20))
@@ -1187,4 +1187,83 @@ test('a memory call names the current part of the Bot chat', async (t) => {
   const answer = await call('memory-ask', { botId: 'b2', text: 'Which part?' })
   assert.equal(answer.ok, true)
   assert.equal(requests[0].sessionId, 'b2-part2')
+})
+
+test('a write reports what changed to an observer, and an observer failure never changes the write', async (t) => {
+  const { rt, tool, read, stop } = start({ config: { workgroup: false } })
+  t.after(() => stop())
+  const observed = []
+  rt.onMemoryWritten = change => { observed.push(change) }
+
+  // A group member's write is what the transport uploads: the scope names the local room, the file
+  // names MEMORY.md or its topic, and the actor is the Bot that made the change.
+  assert.match(await tool('remember', { text: 'Ship on Friday' }, 'g3'), /^Saved to the group memory/)
+  assert.equal(observed.length, 1)
+  assert.deepEqual(observed[0].scope, { kind: 'group', roomId: 'r1' })
+  assert.equal(observed[0].op, 'add')
+  assert.equal(observed[0].before, undefined)
+  assert.match(observed[0].after, /^- Ship on Friday \[source: /)
+
+  assert.match(await tool('remember', { text: 'Ship on Thursday', replace: 'Friday' }, 'g3'), /is now "Ship on Thursday"/)
+  assert.equal(observed[1].op, 'replace')
+  assert.match(observed[1].before, /^- Ship on Friday \[/)
+  assert.match(observed[1].after, /^- Ship on Thursday \[/)
+  assert.equal(observed[1].file.topic, undefined)
+  assert.deepEqual(observed[1].actor, { id: 'b3', name: 'Coder', session: 'g3' })
+
+  assert.match(await tool('forget', { entry: 'Thursday' }, 'g3'), /^Removed from the group memory/)
+  assert.equal(observed[2].op, 'remove')
+  assert.match(observed[2].before, /^- Ship on Thursday \[/)
+  assert.equal(observed[2].after, undefined)
+  assert.equal(read('groups', 'r1', 'MEMORY.md').includes('Ship on'), false)
+
+  // Observation must never become a second write path's failure mode. A throwing observer leaves the
+  // original result and the file exactly as they would have been.
+  rt.onMemoryWritten = () => { throw new Error('observer down') }
+  assert.match(await tool('remember', { text: 'Use pnpm' }, 'g3'), /^Saved to the group memory/)
+  assert.match(read('groups', 'r1', 'MEMORY.md'), /- Use pnpm/)
+})
+
+test('a remote group change lands through the original write path, once, and only for a member', async (t) => {
+  const { rt, tool, read, journal, stop } = start({ config: { workgroup: false } })
+  t.after(() => stop())
+  const change = {
+    eventId: 'mev-remote-1',
+    roomId: 'r1',
+    op: 'add',
+    topic: undefined,
+    before: undefined,
+    after: '- Ship on Friday [source: group "Launch" 2026-10-24; by: Writer; added: 2026-10-24]',
+    actor: { id: 'b3', name: 'Coder' },
+  }
+  const applied = await rt.applyRemoteMemoryChange(change)
+  assert.equal(applied.changed, true)
+  assert.equal(applied.result.changed, true, 'the original add path reports its own result')
+  assert.match(read('groups', 'r1', 'MEMORY.md'), /- Ship on Friday \[source: group "Launch" 2026-10-24; by: Writer; added: 2026-10-24\]/)
+  assert.equal((await tool('recall', { scope: 'group' }, 'g3')).includes('Ship on Friday'), true, 'the entry is in the original store, not a projection')
+  assert.deepEqual(await rt.applyRemoteMemoryChange(change), { changed: false, reason: 'duplicate' })
+  assert.equal(read('groups', 'r1', 'MEMORY.md').match(/Ship on Friday/g).length, 1)
+  assert.deepEqual(journal().map(record => record.op), ['add'], 'a duplicate writes no second journal row')
+
+  // The same path applies a correction and a removal; `before` is the exact line the sender saw.
+  assert.equal((await rt.applyRemoteMemoryChange({
+    eventId: 'mev-remote-2', roomId: 'r1', op: 'replace', topic: undefined,
+    before: '- Ship on Friday [source: forged]', after: '- Ship on Thursday', actor: { id: 'b3', name: 'Coder' },
+  })).changed, true)
+  assert.match(read('groups', 'r1', 'MEMORY.md'), /- Ship on Thursday/)
+  assert.equal((await rt.applyRemoteMemoryChange({
+    eventId: 'mev-remote-3', roomId: 'r1', op: 'remove', topic: undefined,
+    before: '- Ship on Thursday [source: forged]', after: undefined, actor: { id: 'b3', name: 'Coder' },
+  })).changed, true)
+  assert.equal(read('groups', 'r1', 'MEMORY.md').includes('Ship on'), false)
+
+  // A person who is not a member of this local room is refused by the original `writable()` before
+  // anything is written. The transport must report that, not throw into the socket.
+  rt.state.rooms.r1.members = ['b2']
+  const refused = await rt.applyRemoteMemoryChange({
+    eventId: 'mev-remote-4', roomId: 'r1', op: 'add', before: undefined, after: '- Not allowed', actor: { id: 'b3', name: 'Coder' },
+  })
+  assert.equal(refused.changed, false)
+  assert.equal(refused.reason, 'not-member')
+  assert.equal(read('groups', 'r1', 'MEMORY.md').includes('Not allowed'), false)
 })

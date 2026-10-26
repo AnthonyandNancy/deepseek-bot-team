@@ -77,7 +77,7 @@ test('the G3 tables exist and the deliberately absent one does not', (t) => {
   assert.equal(names.includes('otp_challenges'), false, 'otp_challenges must not exist')
 })
 
-test('the G4, G5 and G6 tables all exist', (t) => {
+test('the G4 and G5 tables exist and group memory has no Hub table', (t) => {
   const { db } = withDatabase(t)
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(row => row.name)
 
@@ -88,10 +88,14 @@ test('the G4, G5 and G6 tables all exist', (t) => {
     // that phase added, and the previous phase's "must not exist yet" line is replaced rather than
     // left behind to fail.
     'tasks', 'approvals', 'round_leases', 'artifacts',
-    // G6 (migration 8): the shared store and its audit trail landed here.
-    'group_memories', 'group_memory_events', 'group_memories_fts',
   ]) {
     assert.ok(names.includes(table), `${table} should exist`)
+  }
+  // Group memory belongs to the original engine on each machine. The Hub carries only its
+  // `memory.change` events in the existing events table; a memory table here would be the parallel
+  // store G6R removed.
+  for (const table of ['group_memories', 'group_memory_events', 'group_memories_fts']) {
+    assert.equal(names.includes(table), false, `${table} must not exist`)
   }
 })
 

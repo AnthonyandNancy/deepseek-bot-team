@@ -101,9 +101,9 @@ export const MIGRATIONS = [
     // makes "at least once delivery, deduplicated on receipt" true rather than aspirational.
     //
     // Only the seven tables section 12 assigns to G4, plus the attachment relay the acceptance
-    // matrix (T08) requires. `round_leases`, `tasks`, `approvals`, `artifacts` and
-    // `group_memories` are G5/G6 and are deliberately absent — same reasoning as the absent
-    // `otp_challenges` in migration 1: an empty table reads as "already done".
+    // matrix (T08) requires. `round_leases`, `tasks`, `approvals` and `artifacts` are G5 and are
+    // deliberately absent — same reasoning as the absent `otp_challenges` in migration 1: an empty
+    // table reads as "already done".
     //
     // `attachments` is not section 12's `artifacts`: artifacts hang off a task and carry a
     // sharing ACL that only the approval flow can produce. A group attachment is an ordinary
@@ -272,7 +272,7 @@ export const MIGRATIONS = [
   {
     // G5: cross-user delegation. The four tables section 12 assigns to this phase — the task, the
     // approval B grants on their own device, the single-coordinator lease, and the authorized
-    // artifact. `group_memories` stays absent: that is G6, and an empty table reads as "done".
+    // artifact.
     //
     // `tasks.id` is the *requester's* taskId, minted by A's Bridge and carried in the
     // `task.request` envelope. Making it the primary key is what makes gate 5 structural: a task
@@ -460,65 +460,6 @@ export const MIGRATIONS = [
     statements: [
       `ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
          REFERENCES memberships(id) ON DELETE SET NULL`,
-    ],
-  },
-
-  {
-    // G6: the shared memory of a workgroup. It belongs to the Hub rather than to one machine,
-    // because two colleagues must read the same approved knowledge and somebody who left must stop
-    // reading it on the next call.
-    //
-    // `acl` is a JSON array of user ids, checked on every read. `version` is the compare-and-apply
-    // token for corrections. A soft delete keeps the audit trail without keeping the content
-    // readable, so the triggers also remove deleted rows from the FTS index. Both tables cascade
-    // from `workgroups`, so deleting a group cannot leave its knowledge behind.
-    version: 8,
-    statements: [
-      `CREATE TABLE group_memories (
-        id           TEXT PRIMARY KEY,
-        workgroup_id TEXT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
-        type         TEXT NOT NULL CHECK (type IN ('canon','decision','faq','fact','artifact')),
-        content      TEXT NOT NULL,
-        source_refs  TEXT NOT NULL,
-        acl          TEXT NOT NULL,
-        version      INTEGER NOT NULL DEFAULT 1,
-        created_by   TEXT NOT NULL,
-        created_at   TEXT NOT NULL,
-        updated_at   TEXT NOT NULL,
-        expires_at   TEXT,
-        deleted_at   TEXT
-      )`,
-      'CREATE INDEX group_memories_group ON group_memories(workgroup_id, deleted_at)',
-      `CREATE TABLE group_memory_events (
-        id           TEXT PRIMARY KEY,
-        memory_id    TEXT NOT NULL,
-        workgroup_id TEXT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
-        action       TEXT NOT NULL CHECK (action IN ('created','corrected','deleted')),
-        version      INTEGER NOT NULL,
-        before       TEXT,
-        after        TEXT,
-        actor_id     TEXT NOT NULL,
-        at           TEXT NOT NULL
-      )`,
-      'CREATE INDEX group_memory_events_memory ON group_memory_events(memory_id, at)',
-      `CREATE VIRTUAL TABLE group_memories_fts USING fts5(
-        content, source_refs, content='group_memories', content_rowid='rowid', tokenize='trigram'
-      )`,
-      `CREATE TRIGGER group_memories_ai AFTER INSERT ON group_memories BEGIN
-        INSERT INTO group_memories_fts(rowid, content, source_refs)
-        SELECT rowid, new.content, new.source_refs FROM group_memories
-        WHERE rowid = new.rowid AND new.deleted_at IS NULL;
-      END`,
-      `CREATE TRIGGER group_memories_au AFTER UPDATE ON group_memories BEGIN
-        INSERT INTO group_memories_fts(group_memories_fts, rowid, content, source_refs)
-        SELECT 'delete', old.rowid, old.content, old.source_refs WHERE old.deleted_at IS NULL;
-        INSERT INTO group_memories_fts(rowid, content, source_refs)
-        SELECT new.rowid, new.content, new.source_refs WHERE new.deleted_at IS NULL;
-      END`,
-      `CREATE TRIGGER group_memories_ad AFTER DELETE ON group_memories BEGIN
-        INSERT INTO group_memories_fts(group_memories_fts, rowid, content, source_refs)
-        SELECT 'delete', old.rowid, old.content, old.source_refs WHERE old.deleted_at IS NULL;
-      END`,
     ],
   },
 ]

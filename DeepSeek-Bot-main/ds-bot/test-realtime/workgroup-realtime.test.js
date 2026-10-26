@@ -302,6 +302,39 @@ test('a remote answer is handled by the calling round, not by a second opener', 
 })
 
 
+// 6b. A SETTINGS SAVE MUST PUBLISH A SETTINGS-KIND SIGNAL.
+//
+// The product sidebar now subscribes to the same host feed the workgroup panel uses. This proves
+// the signal it needs actually leaves the other machine: a rename on A publishes a `workgroup`
+// event with kind "settings" on B, so B's store (and the conversation/settings surfaces that read
+// it) can be refreshed without a manual sync.
+test('a settings save is published as a settings-kind workgroup feed event', async (t) => {
+  const { alice, bob, workgroupId } = await invitedPair(t)
+  const abort = new AbortController()
+  const response = await bob.routes['/api/bot/feed'].fetch(
+    new Request('http://localhost/api/bot/feed', { signal: abort.signal }),
+  )
+  const next = reader(response)
+  assert.equal((await next()).event, 'hello')
+  const updated = await alice.call('update-room', {
+    id: roomOf(alice, workgroupId).id,
+    name: '实时设置',
+  })
+  assert.equal(updated.ok, true, JSON.stringify(updated.error))
+  const deadline = Date.now() + 3000
+  let changed
+  while (Date.now() < deadline && changed === undefined) {
+    const frame = await Promise.race([
+      next(),
+      new Promise(resolve => setTimeout(() => resolve(undefined), 150)),
+    ])
+    if (frame?.event === 'workgroup' && frame.data?.kind === 'settings') changed = frame
+  }
+  abort.abort()
+  assert.ok(changed !== undefined, 'a settings save publishes a workgroup event')
+  assert.equal(changed.data.workgroupId, workgroupId)
+})
+
 // 7. A RESTART KEEPS THE SAME LINES, THE SAME IDS AND THE SAME BOT ATTRIBUTION.
 //
 // The Hub is the durable record; a local room is a projection. A restart must replay what this

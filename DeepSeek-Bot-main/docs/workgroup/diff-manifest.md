@@ -52,7 +52,8 @@ done
 | `src/host/diagnostics.js` | 报告增加 Workgroups 行；记录运行中宿主与 `client.js` 的构建时间 | 排障时能区分「运行的是旧进程」与「真有缺陷」 |
 | `src/client/index.js` | 工作群入口 effect；`workgroupOf` 与写操作分流；`roomProgress` 分流；Hub 动作；roster 索引工作群；样式 | 工作群 id 不是本地群 id，写入必须按域分发 |
 | `src/client/sources.js` | `indexRoster(value, workgroups)` + `groupRooms()` | 工作群按群组件要求的形状进 `roomsById` |
-| `src/client/sidebar.js` | 工作群行进入原版侧栏列表；群行补 `title` | 列表内混排，不新开分区 |
+| `src/client/sidebar.js` | 工作群行进入原版侧栏列表；群行补 `title`；**订阅既有 `/api/bot/feed` 的 `workgroup` 事件并刷新 `workgroupStore`** | 列表内混排，不新开分区；远端设置/成员变化要刷新原版会话头、成员卡与设置抽屉读取的那份 roster |
+| `src/workgroup/host/groups.js` | 原版群聊的完整复制；**真实 composer 的 user 行走 `mirrorLine` 上 Hub；跨机 person 行与已匹配的远端 Bot 答复以 `role: 'remote'` 只显示不开轮；普通远端 Bot 发帖保留 `post` + `member`** | 原版没有 Hub：用户行只在本地、同事看不到；匹配答复同时作为 opener 会重复开轮 |
 | `src/client/new-chat.js` | 「Create workgroup」入口与创建路径 | 复用原版建群流程，只换目的地 |
 | `src/client/details-drawer.js` | **工作群走复制件的群设置**（`room.workgroup === true` 分流，一处三元） | 工作群行的实际路径是「原版会话 → 齿轮 → 群设置」，不改这里复制件不可达。§5.2 需补入本文件 |
 | `src/client/settings.js` | 同上，设置页的 `groups` 分支也分流 | §5.2 已列本文件 |
@@ -62,7 +63,7 @@ done
 | `src/client/at-menu.js` | `@` 候选排除工作群 | 否则工作群以 id 形式出现在"其他对话"里 |
 | `src/client/settings.js` | `hub` 页、图标、渲染行 | Hub 账号页入口 |
 | `src/client/i18n.js` | 工作群/Hub 文案与「未完成」声明 | 新增界面文案必须有中文 |
-| `src/workgroup/client/panel.js` | 面板顶部「未完成」声明 | G3 水位必须显式标注 |
+| `src/workgroup/client/panel.js` | 面板顶部「未完成」声明；**导出既有 `listenLive`，供产品侧栏复用同一订阅** | G3 水位必须显式标注；一个浏览器只开一条 workgroup 推送 |
 | `client.js` | 生成物重建 | 仓库规则：不得手改 |
 
 ## 3. 未修改的原版文件（逐字节相同）
@@ -89,10 +90,7 @@ done
 | `src/workgroup/host/hub.js` | 无（原版没有 Hub） | 跨用户传输在原版不存在，属真正的本域新增 | ✅ 合理 |
 | `src/workgroup/host/bridge.js` | 无（原版没有 socket 同步） | 同上 | ✅ 合理 |
 | `src/workgroup/host/memory-sync.js` | `src/host/memory.js` 的全套群记忆 | **不新写记忆引擎**：只把原版写入转成事件、把远端事件喂回原版写入路径 | ✅ 传输层新增，引擎复用 |
-| `hub/src/memories/service.js` | `src/host/memory.js` 的条目/容量/权限语义 | 原版是单机 Markdown 文件，没有跨账号共享、成员 ACL、版本 compare-and-apply 与 Hub 审计；存储后端与传输必须新写。条目类型、容量、凭据拒收与回顾入口沿用原版口径，不另造记忆产品模型 | ✅ 存储后端新增，业务语义复用 |
-| `hub/src/db/migrations.js` v8 | 无（原版没有 Hub 数据库） | `group_memories` / `group_memory_events` / FTS 是 Hub 权威存储的结构要求，原版文件系统无法表达跨机 ACL 与级联删除 | ✅ 存储后端新增 |
-| `src/workgroup/host/memories.js` | `src/host/memory.js` 的 `queue/loadScope` 与 `memory-view` | 原版引擎只读写本机文件，无法把远端条目变成可冻结提示词投影；本模块只做 Hub 读取后的投影与事件触发重读，不实现第二套记忆语义 | ✅ 投影/传输新增 |
-| `src/workgroup/client/group-settings.js` 的 `MemoryCard` | `src/client/memory-panel.js` + 原版群详情 `MemoryRow` | 原版面板没有 Hub 调用，也没有 ACL 条目列表/修正/删除的跨机路径；卡片只调用既有 `apiHandle`，展示与操作复用原版记忆面板的形态与文案口径 | ✅ UI 适配新增，不新写记忆语义 |
+| `hub/src/ws.js` 的 `memory.change` 处理器 | `hub/src/ws.js` 的 `chat.message` 处理器 | Hub 已有点对点事件流与 `events` 表；只增加一种帧类型，不新增表、解释载荷或记忆语义 | ✅ 传输层新增 |
 | `src/workgroup/host/ownership.js` 的 `rt.memoryRoomOf` | `src/host/memory.js:1476` 的 `agent/status` 过滤与 `roomIdOf` | 原版只认 `isBotSession`，工作群成员 Session 不在原版索引；新增只读接缝，不改变 `isBotSession` 或原版记忆行为 | ✅ 只读接缝 |
 
 判定口径：

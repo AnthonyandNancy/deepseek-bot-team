@@ -286,6 +286,14 @@ test('a Bot reply that crossed the Hub continues the round instead of reading as
     'a remote Bot line is marked as a member speaking, not as the user')
 })
 
+test('the product sidebar consumes the workgroup feed and refreshes the shared store', () => {
+  assert.match(panelSrc, /export const listenLive/, 'the existing subscriber is exported')
+  assert.match(sidebarSrc, /listenLive/, 'the product sidebar subscribes to the same feed')
+  assert.match(sidebarSrc, /refreshWorkgroups()/, 'and re-reads the list projection')
+  assert.match(sidebarSrc, /payload\?\.kind === 'settings'/, 'a settings signal is handled')
+  assert.match(sidebarSrc, /hasWorkgroups/, 'a team with no workgroups opens no feed')
+})
+
 test('the settings form writes the Hub setting that makes the admin receive plain messages', () => {
   // The form sends the original's field names (`mode`, `admin`); the workgroup channel forwards
   // them as this domain's own and the host pushes them to the Hub. A report of "not synced" has to
@@ -300,20 +308,4 @@ test('the settings form writes the Hub setting that makes the admin receive plai
   assert.match(groupsSrc, /leadTouched[\s\S]{0,400}leadMembershipId/, 'and the chosen lead with it')
   assert.match(groupsSrc, /const modeChanged = WG_ROOM_MODES\.includes\(replyMode\) && room\.mode !== replyMode/,
     'the other machine applies the shared mode on its next roster read')
-})
-
-test('the workgroup settings form lists, searches, adds, corrects and deletes group memory', () => {
-  const source = readFileSync(new URL('../src/workgroup/client/group-settings.js', import.meta.url), 'utf8')
-  for (const endpoint of ['memory-list', 'memory-search', 'memory-create', 'memory-correct', 'memory-delete']) {
-    assert.ok(source.includes(`callWorkgroup('${endpoint}'`), `${endpoint} goes through the one workgroup API`)
-  }
-  assert.match(source, /expectedVersion/, 'a correction sends the version it read')
-  // After a successful write the card re-reads the Hub; it never appends the write to a local list.
-  assert.match(source, /await readMemories\(\)/, 'a successful write re-reads memory-list')
-  assert.doesNotMatch(source, /setMemories\(\[\.\.\.memories/, 'the card does not merge a write locally')
-})
-
-test('a memory signal makes the open group re-read its memory section', () => {
-  const source = readFileSync(new URL('../src/workgroup/client/panel.js', import.meta.url), 'utf8')
-  assert.match(source, /kind === 'memory'/, 'the workgroup feed event names a memory refresh')
 })

@@ -13,8 +13,6 @@ const READS = new Set([
   // without approving anything or running anything.
   'task-requests', 'task-state', 'task-list', 'task-artifacts', 'artifact-download',
   'group-lease',
-  // G6 reads. They read the Hub's authoritative list/search and never write a local merge.
-  'memory-list', 'memory-search',
 ])
 
 const invalid = message => Object.assign(new Error(message), { code: 'bot/invalid' })
@@ -843,61 +841,6 @@ export function install(wg) {
           const workgroupId = String(body.workgroupId ?? '')
           if (workgroupId === '') throw invalid('No workgroup named')
           return ok(await wg.hub.lease({ workgroupId }))
-        }
-
-        // ── group memory (G6) ────────────────────────────────────────────────
-        // The panel and the tests use one door. Reads always ask the Hub; writes go to the Hub and
-        // then refresh the local projection. A memory event never carries a merge instruction.
-        case 'memory-list': {
-          const workgroupId = String(body.workgroupId ?? '')
-          if (workgroupId === '') throw invalid('No workgroup named')
-          return ok(await wg.hub.memories({ workgroupId }))
-        }
-
-        case 'memory-search': {
-          const workgroupId = String(body.workgroupId ?? '')
-          const query = String(body.query ?? '')
-          if (workgroupId === '') throw invalid('No workgroup named')
-          if (query.trim() === '') return ok({ memories: [] })
-          return ok(await wg.hub.searchMemories({ workgroupId, query }))
-        }
-
-        case 'memory-create': {
-          const workgroupId = String(body.workgroupId ?? '')
-          const type = String(body.type ?? '')
-          const content = String(body.content ?? '')
-          if (workgroupId === '') throw invalid('No workgroup named')
-          if (content.trim() === '') throw invalid('Write the memory first')
-          return ok(await wg.createMemory({
-            workgroupId, type, content,
-            sourceRefs: Array.isArray(body.sourceRefs) ? body.sourceRefs : [],
-            acl: Array.isArray(body.acl) ? body.acl : [],
-            ...(typeof body.expiresAt === 'string' && body.expiresAt !== '' ? { expiresAt: body.expiresAt } : {}),
-          }))
-        }
-
-        case 'memory-correct': {
-          const workgroupId = String(body.workgroupId ?? '')
-          const memoryId = String(body.memoryId ?? '')
-          const content = String(body.content ?? '')
-          if (workgroupId === '') throw invalid('No workgroup named')
-          if (memoryId === '') throw invalid('No memory named')
-          if (content.trim() === '') throw invalid('Write the correction first')
-          if (!Number.isInteger(body.expectedVersion)) return fail('A correction needs the version it read', 'memory/version-required')
-          return ok(await wg.correctMemory({
-            workgroupId, memoryId, content, expectedVersion: body.expectedVersion,
-            ...(Array.isArray(body.sourceRefs) ? { sourceRefs: body.sourceRefs } : {}),
-            ...(Array.isArray(body.acl) ? { acl: body.acl } : {}),
-          }))
-        }
-
-        case 'memory-delete': {
-          const workgroupId = String(body.workgroupId ?? '')
-          const memoryId = String(body.memoryId ?? '')
-          if (workgroupId === '') throw invalid('No workgroup named')
-          if (memoryId === '') throw invalid('No memory named')
-          if (!Number.isInteger(body.expectedVersion)) return fail('A deletion needs the version it read', 'memory/version-required')
-          return ok(await wg.deleteMemory({ workgroupId, memoryId, expectedVersion: body.expectedVersion }))
         }
 
         // ── password recovery ──────────────────────────────────────────────────────

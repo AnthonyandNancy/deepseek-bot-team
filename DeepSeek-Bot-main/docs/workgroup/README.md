@@ -1,7 +1,7 @@
 # 工作群（BotCode 迁移）实施文档
 
 - 日期：2026-10-22（2026-10-26 更新）
-- 水位：**G6 原方案已被否决，G6R 纠偏待开工**。原版群记忆引擎已复用（G3 解析缝 + 原版面板）；缺的是跨机传输。G4/G5 自动门禁已并入 `main`（`e71119b`）；G4-1/5/6、G4-T20、G5-T12/N3/T14、G6-M1 仍待人工。纠偏计划见 `docs/superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md`，续接指令见 `g6r/NEXT-INSTRUCTION.md`
+- 水位：**G6 原方案已被否决；G6R 自动化已完成，人工项仍 BLOCKED**。原版群记忆引擎是唯一实现，Hub 只传输 `memory.change`。G4/G5 自动门禁已并入 `main`（`e71119b`）；G4-1/5/6、G4-T20、G5-T12/N3/T14、G6-M1 仍待人工。纠偏计划见 `docs/superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md`，续接指令见 `g6r/NEXT-INSTRUCTION.md`
 - 需求：`../plans/2026-10-22-workgroup-migration.md`
 - 计划：`../plans/2026-10-22-workgroup-migration-implementation-plan.md`
 - 技术方案（源基线原文）：`BotCode/Workgroup_AI_技术实施方案_2026-10-21.md.md`（换算规则见 `CONVERSION.md`）
@@ -14,7 +14,7 @@
 4. `manual-checklist.md` — 需要人执行的验收（AI 不自评）
 5. `progress-and-gaps.md` — 做到哪、缺什么、为什么
 6. `g4-entry.md` → `g4/NEXT-INSTRUCTION.md` — 下一阶段从这里开始
-7. `g6r/NEXT-INSTRUCTION.md` — **G6R 纠偏续接指令**（接下来从这里开始；`g6/` 是已被否决的旧方案）
+7. `g6r/EVIDENCE-MATRIX.md` — **G6R 当前证据**（自动化已完成；`g6/` 是已被否决的旧方案）
 8. `g0/`…`g5/` — 需要追溯历史或原始证据时再读（历史口径，见 `CONVERSION.md`）
 
 ## 目录

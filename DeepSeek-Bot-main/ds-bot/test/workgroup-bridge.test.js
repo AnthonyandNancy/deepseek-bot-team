@@ -370,3 +370,42 @@ test('a reconnect backoff is bounded and does not spin', async (t) => {
   assert.equal(stubbed.status().connected, false)
   await stubbed.stop()
 })
+
+test('the ack for a memory change never draws an empty chat line', async (t) => {
+  const { hub, baseUrl } = await withHub(t)
+  await signIn(hub, '+8613800138000')
+  const { wg } = await withDomain(t, { baseUrl, phone: '+8613800138000' })
+  await wg.bridge.start()
+  await until(() => wg.bridge.status().connected, { label: 'the socket' })
+  const created = await wg.bridge.createWorkgroup({ name: '记忆确认' })
+  const workgroupId = created.workgroupId
+  const room = wg.roomOfHubGroup(workgroupId)
+  const before = (room.log ?? []).length
+  const received = []
+  const original = wg.receiveRemote
+  wg.receiveRemote = async (args) => { received.push(args); return original(args) }
+  t.after(() => { wg.receiveRemote = original })
+
+  // The ack compensation in `bridge.js` is for chat: it rebuilds a chat.message from the outbox.
+  // A memory.change sent through the same outbox must not take that branch, or the sender gets a
+  // blank line in the group merely for writing a memory entry.
+  await wg.bridge.sendEvent({
+    workgroupId,
+    frameType: 'memory.change',
+    eventId: 'mev-ack-chat-1',
+    payload: {
+      roomKey: workgroupId,
+      op: 'add',
+      topic: null,
+      before: null,
+      after: '- A remembered fact [source: test; added: 2026-10-24]',
+      actor: { id: 'user', name: 'user' },
+      at: '2026-10-24T00:00:00.000Z',
+    },
+  })
+  await until(() => wg.bridge.status().pending === 0, { label: 'the memory ack' })
+  await new Promise(resolve => setTimeout(resolve, 150))
+  assert.equal(received.length, 0, 'the memory ack never enters the chat apply path')
+  assert.equal((wg.workgroupOf(room.id)?.log ?? []).length, before,
+    'a memory.change acknowledgement is not a chat line')
+})

@@ -78,23 +78,22 @@ const catchError = (fn) => {
   return undefined
 }
 
-test('a G5 database upgrades through the memory migration rather than refusing to start', () => {
-  // Migrations 5 and 6 are the G4 repairs; v7 added `workgroups.lead_membership_id`. G6's v8 adds
-  // the shared memory tables. The version assertion moves with each phase: what it protects is that
-  // an existing Hub file is upgraded in place, not that any particular number is eternal.
-  assert.equal(LATEST_VERSION, 8)
+test('a G5 database upgrades to the latest schema rather than refusing to start', () => {
+  // Migrations 5 and 6 are the G4 repairs; v7 added `workgroups.lead_membership_id`. G6R adds no
+  // migration at all: group memory stays in the original engine on each machine.
+  assert.equal(LATEST_VERSION, 7)
 })
 
-test('the four G5 tables exist and the G6 tables arrived with migration 8', (t) => {
+test('the four G5 tables exist and group memory has no Hub table', (t) => {
   const { db } = withDatabase(t)
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name)
   for (const table of ['tasks', 'approvals', 'round_leases', 'artifacts']) {
     assert.ok(names.includes(table), `${table} must exist after migration 4`)
   }
-  // G6 landed: the store is no longer allowed to be absent, and `db-g6-schema.test.js` owns its
-  // shape. Keeping the names here makes a future migration that drops them fail loudly.
+  // G6R reuses the original group-memory engine; the Hub only stores `memory.change` in the
+  // existing events table. Keeping these names absent makes a future parallel store fail loudly.
   for (const table of ['group_memories', 'group_memory_events', 'group_memories_fts']) {
-    assert.ok(names.includes(table), `${table} must exist after migration 8`)
+    assert.equal(names.includes(table), false, `${table} must not exist`)
   }
 })
 
