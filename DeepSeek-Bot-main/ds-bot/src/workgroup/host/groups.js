@@ -29,7 +29,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { mentionSpans, speakerOf } from '../../shared/mentions.js'
 import { escapeRegExp, headOf, splitRef, textOf } from '../../host/text.js'
 import { SOURCE_KIND, TEAM_TOOLS } from '../../host/constants.js'
-import { WG_ADOPT_INTERVAL_MS, WG_ADMIN_EXTRA_TURNS, WG_ADMIN_TURNS_EACH, WG_DELTA_MAX, WG_DIR, WG_EXTRA_TURNS, WG_FIRST_LOOK, WG_LATE_ROUNDS, WG_LINE_READ, WG_LOG_MAX, WG_READ_MAX, WG_REPLY_TIMEOUT_MS, WG_ROOM_MAX_MEMBERS, WG_ROOM_MIN_MEMBERS, WG_ROOM_MODES, WG_SOURCE_KIND, WG_STEP_GAP_MS, WG_TEXT_KEPT, WG_TOOLS, WG_TURNS_EACH, WG_WORK_GRACE_MS } from '../shared/constants.js'
+import { WG_ADOPT_INTERVAL_MS, WG_DELTA_MAX, WG_DIR, WG_FIRST_LOOK, WG_LATE_ROUNDS, WG_LINE_READ, WG_LOG_MAX, WG_READ_MAX, WG_REPLY_TIMEOUT_MS, WG_ROOM_MAX_MEMBERS, WG_ROOM_MIN_MEMBERS, WG_ROOM_MODES, WG_SOURCE_KIND, WG_STEP_GAP_MS, WG_TEXT_KEPT, WG_TOOLS, WG_WORK_GRACE_MS } from '../shared/constants.js'
 
 // The original's group passes [PASS] to stay silent; the same rule applies here so a
 // copied round behaves identically.

@@ -9,14 +9,8 @@ const twoMembers = () => ([
   { id: 'bot-b', kind: 'localBot', name: 'Editor' },
 ])
 
-const emitTo = async (ctx, sessionId, event) => {
-  for (const listener of ctx.listeners.get('session/event') ?? []) {
-    if (listener.length >= 2) await listener({ id: sessionId }, event)
-  }
-}
-
 test('a workgroup parks a Bot call past its relay limit and Continue releases it once', async (t) => {
-  const { wg, ctx, stop } = startRoundFixture()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'RelayProbe', members: twoMembers() })
   await wg.updateWorkgroup(room.id, { relayLimit: 1 })
