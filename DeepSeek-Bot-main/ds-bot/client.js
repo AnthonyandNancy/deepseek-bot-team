@@ -265,6 +265,7 @@ var ZH = {
   "Who answers": "谁来回答",
   "Choose an admin first": "先选一个管理员",
   "@mentions always pick who answers.": "@提及总是指定由谁回答。",
+  "Bot relays": "Bot 接力",
   "Pause Bot relays after": "Bot 接力几次后暂停",
   "Counted since your last message in this group.": "从你在群里的上一条消息算起。",
   Notice: "群公告",
@@ -9081,7 +9082,7 @@ var readAsBase64 = (file) => new Promise((resolve2, reject) => {
   };
   reader.readAsDataURL(file);
 });
-function Composer({ roomId, hub, archived, onSent }) {
+function Composer({ roomId, hub, archived, paused = 0, onSent }) {
   const [text, setText] = (0, import_react16.useState)("");
   const [busy, setBusy] = (0, import_react16.useState)(false);
   const [note, setNote] = (0, import_react16.useState)(null);
@@ -9159,6 +9160,11 @@ function Composer({ roomId, hub, archived, onSent }) {
           onChange: (event) => void attach(event.target.files?.[0])
         })
       ),
+      paused > 0 ? (0, import_react16.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        onClick: () => void run2(() => callWorkgroup("continue-room", { roomId }))
+      }, t("Continue")) : null,
       (0, import_react16.createElement)("button", {
         type: "button",
         className: "bt-soft bt-soft-sm",
@@ -9464,6 +9470,7 @@ function ChatPane({ roomId, roster }) {
       roomId,
       hub: room2.hub ?? null,
       archived: room2.archived === true,
+      paused: (room2.paused ?? []).length,
       onSent: () => void openWorkgroup(roomId)
     }),
     (0, import_react16.createElement)(HubLine, { hub: room2.hub ?? null }),
@@ -14783,6 +14790,44 @@ function GroupPermission2({ room: room2, catalog, update }) {
     ) : null
   );
 }
+function RelayLimitRow2({ room: room2, update }) {
+  const [draft, setDraft] = (0, import_react36.useState)(room2.relayLimit ?? "");
+  (0, import_react36.useEffect)(() => setDraft(room2.relayLimit ?? ""), [room2.relayLimit]);
+  const save = () => {
+    const text = String(draft).trim();
+    if (text === "") {
+      if (room2.relayLimit !== void 0 && room2.relayLimit !== null) update({ relayLimit: null });
+      return;
+    }
+    const limit = Number(text);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200 || limit === room2.relayLimit) {
+      setDraft(room2.relayLimit ?? "");
+      return;
+    }
+    update({ relayLimit: limit });
+  };
+  return (0, import_react36.createElement)(
+    Row,
+    { label: t("Pause Bot relays after"), hint: t("Counted since your last message in this group.") },
+    (0, import_react36.createElement)("input", {
+      className: "bt-bs-input bt-bs-num",
+      type: "number",
+      min: 1,
+      max: 200,
+      placeholder: String(room2.relayLimitDefault ?? ""),
+      value: draft,
+      "aria-label": t("Pause Bot relays after"),
+      onChange: (event) => setDraft(event.target.value),
+      onBlur: save,
+      onKeyDown: (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          event.currentTarget.blur();
+        }
+      }
+    })
+  );
+}
 function GroupSettingsForm2({ room: room2, roster, actions, run: run3, onDeleted }) {
   const [adding, setAdding] = (0, import_react36.useState)(false);
   const [confirming, setConfirming] = (0, import_react36.useState)(false);
@@ -14857,6 +14902,13 @@ function GroupSettingsForm2({ room: room2, roster, actions, run: run3, onDeleted
         }, t(label)))),
         (0, import_react36.createElement)("span", { key: mode, className: "bt-set-hint bt-veil" }, `${t(modeHint)} ${t("@mentions always pick who answers.")}`)
       )
+    ),
+    // The group's one guard, copied from the original's RelayLimitRow: how many Bot
+    // turns may answer Bot calls since the user last wrote, before the group pauses.
+    (0, import_react36.createElement)(
+      Card,
+      { title: t("Bot relays") },
+      (0, import_react36.createElement)(RelayLimitRow2, { room: room2, update })
     ),
     (0, import_react36.createElement)(
       Card,

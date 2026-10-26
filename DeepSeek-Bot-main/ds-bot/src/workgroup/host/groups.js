@@ -951,6 +951,11 @@ export function install(wg) {
       }
     }
     if (patch.notice !== undefined) room.notice = String(patch.notice ?? '').slice(0, 2000)
+    if (patch.relayLimit !== undefined) {
+      if (patch.relayLimit === null) delete room.relayLimit
+      else if (!Number.isInteger(patch.relayLimit) || patch.relayLimit < 1 || patch.relayLimit > 200) throw new Error('Relay limit must be a whole number from 1 to 200')
+      else room.relayLimit = patch.relayLimit
+    }
     // COPY OF THE ORIGINAL (`planRoomChange`, src/host/roster.js:392): the reply mode is
     // one of the two the original accepts. Before this, the settings form offered "Who
     // answers" and the choice was dropped on the floor — `room.mode` stayed 'admin' while
@@ -2189,7 +2194,12 @@ export function install(wg) {
   // with `workgroup_post` counted as still busy, so the round stopped waiting for its answer and
   // posted whatever it had. A local group's same three calls are quick and the member keeps its
   // slot. That difference is what the user described as 「工作群 bot 的工具使用没有原版全」.
-  const QUICK_TOOLS = new Set([...TEAM_TOOLS, ...Object.values(WG_TOOLS)])
+  // The only bound on a workgroup: how many Bot turns may answer Bot calls since the
+// user last wrote in it, after which the group pauses rather than going on alone.
+// Kept in step with the original's `defaultRelayLimit`.
+const defaultRelayLimit = room => 3 * ((room?.members ?? []).filter(member => member.kind !== 'user').length)
+const relayLimit = room => room.relayLimit ?? defaultRelayLimit(room)
+const QUICK_TOOLS = new Set([...TEAM_TOOLS, ...Object.values(WG_TOOLS)])
   wg.workRoomTurn = (sessionId, tool) => {
     if (QUICK_TOOLS.has(tool)) return
     for (const waiter of waitersOf(sessionId)) waiter.work()
@@ -2198,18 +2208,33 @@ export function install(wg) {
   // COPY OF THE ORIGINAL (`callMembers`, src/host/groups.js:355). A called member moves up
   // if it is still waiting, or gets one more turn if it already spoke; either way it goes
   // right after slot `index`. `cap` is the caller's per-member turn bound.
-  function callMembers(round, turns, index, callees, note, cap, by) {
+  function callMembers(round, index, callees, note, by, origin) {
     let next = index + 1
     for (const peer of callees) {
-      if ((turns.get(peer.id) ?? 0) >= cap) continue
       const waiting = round.slots.findIndex((other, at) => at > index && other.id === peer.id && other.status === 'waiting')
       const called = waiting === -1 ? { id: peer.id, name: peer.name, status: 'waiting' } : round.slots.splice(waiting, 1)[0]
       called.note = note
+      called.origin = origin
       if (by === undefined) delete called.by
       else called.by = by
       round.slots.splice(next, 0, called)
       next += 1
     }
+  }
+  // A call parked at the relay limit waits for the user, who releases it by writing
+  // here or pressing Continue. It resumes as a Bot-origin call after the user's picks.
+  const resumePaused = (room, round) => {
+    const paused = room.paused ?? []
+    if (paused.length === 0) return
+    for (const entry of paused) {
+      if (round.slots.some(slot => slot.id === entry.id && slot.status === 'waiting')) continue
+      round.slots.push({
+        id: entry.id, name: entry.name, status: 'waiting', origin: 'bot',
+        ...(entry.note !== undefined ? { note: entry.note } : {}),
+        ...(entry.by !== undefined ? { by: entry.by } : {}),
+      })
+    }
+    room.paused = []
   }
 
   // COPY OF THE ORIGINAL (`openingSpeakers`, src/host/groups.js:670). A member that posts
@@ -2229,6 +2254,8 @@ export function install(wg) {
     const members = answerable.filter(member => member.id !== opener.botId)
     const admin = members.find(member => member.id === room.adminId)
     if (opener.kickoff) return admin ? [admin] : []
+    // A Continue opens a round whose speakers are the calls the limit parked.
+    if (opener.resume) return []
     if (opener.quiet) return []
     if (opener.done) return members.filter(member => member.id === opener.askedBy)
     const { all, found: named } = mentionsIn(opener.text ?? '', everyone)
@@ -2258,13 +2285,12 @@ export function install(wg) {
     .filter(item => item.kickoff !== true && item.botId === undefined && String(item.text ?? '') !== '')
     .map(item => ({ id: item.id ?? item.text, text: String(item.text ?? '') }))
 
-  function drainRoomInbox(room, round, turns, index) {
+  function drainRoomInbox(room, round, index) {
     // The greeting's prompt tells the admin the user has not written yet.
-    if (round.kickoff) return 0
+    if (round.kickoff) return
     const lines = waitingLines(room.id)
-    if (lines.length === 0) return 0
+    if (lines.length === 0) return
     wg.roomInbox.delete(room.id)
-    const before = round.slots.length
     for (const line of lines) {
       appendLine(room, { who: 'User', text: line.text })
       round.replies.push({ kind: 'user', text: line.text, time: Date.now() })
@@ -2272,12 +2298,12 @@ export function install(wg) {
       // round, and the note says whether the user named them.
       const { all, found } = mentionsIn(line.text, room.members ?? [])
       const note = all || found.length > 0 ? 'the user mentioned you' : 'new message from the user'
-      callMembers(round, turns, index - 1, openingSpeakers(room, { text: line.text }), note, WG_ADMIN_TURNS_EACH)
+      callMembers(round, index - 1, openingSpeakers(room, { text: line.text }), note, undefined, 'user')
     }
-    // The user spoke in this room, so late results may call members again.
-    room.lateRounds = 0
+    // The user spoke in this room, so Bot relays count afresh and the paused run.
+    room.relays = 0
+    resumePaused(room, round)
     void wg.save().catch(() => {})
-    return round.slots.length - before
   }
 
   // ── the coordinator lease (plan §9.5) ───────────────────────────────────────────
@@ -2332,16 +2358,11 @@ export function install(wg) {
     // working, a remote call is sent, an answer arrives, or a slot ends. A terminal round is removed
     // instead, because nothing remains to recover.
     const persist = () => wg.persistRound(round)
-    let limit = round.slots.length + WG_EXTRA_TURNS + (room.adminId !== undefined && room.adminId !== null ? WG_ADMIN_EXTRA_TURNS : 0)
-    const turns = new Map()
-    // COPY OF THE ORIGINAL (`groups.js:415`): the inbox half of the condition keeps a
-    // message the user typed during the LAST speaker's turn inside this round. Without it
-    // the loop ended with the slots, and that message opened a second round instead.
-    for (let index = 0;
-      (index < round.slots.length || waitingLines(room.id).length > 0) && (round.turns ?? 0) < limit;
-      index += 1) {
+    // The inbox half of the condition keeps a message the user typed during the LAST
+    // speaker's turn inside this round.
+    for (let index = 0; index < round.slots.length || waitingLines(room.id).length > 0; index += 1) {
       if (signal.aborted) break
-      limit += drainRoomInbox(room, round, turns, index)
+      drainRoomInbox(room, round, index)
       if (index >= round.slots.length) break
       const slot = round.slots[index]
       const member = (room.members ?? []).find(other => other.id === slot.id)
@@ -2351,10 +2372,25 @@ export function install(wg) {
         persist()
         continue
       }
+      // The group's one guard: Bots calling each other can go on only so long without
+      // the user. Past the limit the call is parked, not dropped.
+      if (slot.origin === 'bot' && (room.relays ?? 0) >= relayLimit(room)) {
+        slot.status = 'paused'
+        const paused = (room.paused ??= [])
+        round.parked = [...new Set([...(round.parked ?? []), slot.name])]
+        if (!paused.some(entry => entry.id === slot.id)) {
+          paused.push({
+            id: slot.id, name: slot.name,
+            ...(slot.note !== undefined ? { note: slot.note } : {}),
+            ...(slot.by !== undefined ? { by: slot.by } : {}),
+          })
+        }
+        persist()
+        continue
+      }
       slot.status = 'speaking'
       round.speaking = member.id
-      round.turns = (round.turns ?? 0) + 1
-      turns.set(member.id, (turns.get(member.id) ?? 0) + 1)
+      if (slot.origin === 'bot') room.relays = (room.relays ?? 0) + 1
       persist()
       // A remote member is a person (or a Bot) on another device. Their turn is not a model
       // call this machine can make: it is a message on the Hub, and the answer — if any —
@@ -2455,7 +2491,7 @@ export function install(wg) {
         const { all, found: named } = mentionsIn(spoken, everyone)
         const found = named.filter(other => other.id !== member.id)
         const callees = leads && all ? [...found, ...others.filter(other => !found.includes(other))] : found
-        callMembers(round, turns, index, callees, `${member.name} mentioned you`, leads ? WG_ADMIN_TURNS_EACH : WG_TURNS_EACH, member.id)
+        callMembers(round, index, callees, `${member.name} mentioned you`, member.id, 'bot')
         continue
       }
       let session
@@ -2520,8 +2556,15 @@ export function install(wg) {
       const { all, found: named } = mentionsIn(spoken.join('\n\n'), everyone)
       const found = named.filter(other => other.id !== member.id)
       const callees = leads && all ? [...found, ...others.filter(other => !found.includes(other))] : found
-      callMembers(round, turns, index, callees, `${member.name} mentioned you`, leads ? WG_ADMIN_TURNS_EACH : WG_TURNS_EACH, member.id)
+      callMembers(round, index, callees, `${member.name} mentioned you`, member.id, 'bot')
       persist()
+    }
+    // A pause is reported once, with the calls it parked. They stay in room.paused
+    // until the user writes here or presses Continue.
+    if ((round.paused ?? []).length > 0) {
+      const limit = relayLimit(room)
+      appendLine(room, { who: 'DS Bot', kind: 'notice', reason: 'paused', names: round.parked, limit })
+      round.replies.push({ kind: 'paused', names: round.parked, count: limit, time: Date.now() })
     }
     // THE LOOP EITHER FINISHED THE ROUND OR LEFT A DURABLE OBLIGATION.
     //
@@ -2545,6 +2588,26 @@ export function install(wg) {
     await wg.save()
   }
   wg.runRound = runRound
+  // The Continue of a workgroup paused at its relay limit: the parked calls run in a
+  // round of their own, opened by the same relay a user message opens.
+  async function continueRoom(roomId) {
+    await wg.load()
+    const room = wg.workgroupOf(roomId)
+    if (room === undefined) throw new Error('Unknown workgroup')
+    if ((room.paused ?? []).length === 0) return false
+    room.relays = 0
+    await wg.save({ roomId, kind: 'continue' })
+    // The group Session's relay hook turns this cue into the parked-call round. The
+    // same call is used by the local button and by a group.continue event from a peer.
+    const agent = await rt.resolveAgent(room.id)
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: '[Continue]' }],
+      source: { kind: 'user', role: 'resume', exchangeId: randomUUID(), senderName: 'You', roomId: room.id },
+    }))
+    await ctx.sessions.flush(agent.session)
+    return { roomId: room.id, hubWorkgroupId: room.hubWorkgroupId ?? null }
+  }
+  wg.continueRoom = continueRoom
 
   // COPY OF THE ORIGINAL (`postStep`, src/host/groups.js:731): what a member says while it
   // works, posted into the group. While the member holds its place in a round it joins
@@ -3240,7 +3303,11 @@ export function install(wg) {
       if (!isGroupSession(owner)) return
       // Only the GROUP's own Session queues; a member's Session is a Bot's own turn and
       // must never be read as a user post to the group.
-      if (source?.kind === 'user' || source?.kind === 'schedule') {
+      if (source?.role === 'resume') {
+        // Continue is a cue, never a user line: the parking slots below become the round.
+        queue({ text: '', resume: true })
+      }
+      else if (source?.kind === 'user' || source?.kind === 'schedule') {
         // COPY OF THE ORIGINAL (`turns.js:471-482`): the attachments the user sent travel
         // with the queued message, so the round can put them in the log and hand them to
         // each member. Images are read as text for the log; files stay as files.

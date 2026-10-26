@@ -367,7 +367,7 @@ const readAsBase64 = file => new Promise((resolve, reject) => {
   reader.readAsDataURL(file)
 })
 
-function Composer({ roomId, hub, archived, onSent }) {
+function Composer({ roomId, hub, archived, paused = 0, onSent }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState(null)
@@ -439,6 +439,11 @@ function Composer({ roomId, hub, archived, onSent }) {
           'aria-label': t('Attach a file'),
           onChange: event => void attach(event.target.files?.[0]),
         })),
+      paused > 0 ? h('button', {
+        type: 'button',
+        className: 'bt-soft bt-soft-sm',
+        onClick: () => void run(() => callWorkgroup('continue-room', { roomId })),
+      }, t('Continue')) : null,
       h('button', {
         type: 'button',
         className: 'bt-soft bt-soft-sm',
@@ -760,6 +765,7 @@ function ChatPane({ roomId, roster }) {
       roomId,
       hub: room.hub ?? null,
       archived: room.archived === true,
+      paused: (room.paused ?? []).length,
       onSent: () => void openWorkgroup(roomId),
     }),
     h(HubLine, { hub: room.hub ?? null }),

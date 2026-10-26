@@ -232,6 +232,7 @@ const ZH = {
   'Who answers': '谁来回答',
   'Choose an admin first': '先选一个管理员',
   '@mentions always pick who answers.': '@提及总是指定由谁回答。',
+  'Bot relays': 'Bot 接力',
   'Pause Bot relays after': 'Bot 接力几次后暂停',
   'Counted since your last message in this group.': '从你在群里的上一条消息算起。',
   Notice: '群公告',

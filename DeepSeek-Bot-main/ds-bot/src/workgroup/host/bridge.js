@@ -239,6 +239,16 @@ export function createBridge({ wg, logger, now = () => Date.now(), webSocketImpl
       void Promise.resolve(wg.onTaskEvent?.({ workgroupId, event }))
         .catch(error => logger?.warn?.('ds-bot: task event %s not applied: %s', event.eventId, error?.message ?? error))
     }
+    // A Continue on a paused workgroup: the peer runs the parked calls through the same
+    // `continueRoom` the local button uses. It is a control signal, not a chat line.
+    if (event.type === 'group.continue') {
+      void Promise.resolve()
+        .then(async () => {
+          const room = wg.roomOfHubGroup?.(workgroupId)
+          if (room !== undefined) await wg.continueRoom?.(room.id)
+        })
+        .catch(error => logger?.warn?.('ds-bot: group.continue %s not applied: %s', event.eventId, error?.message ?? error))
+    }
     // G6R: one change the ORIGINAL memory engine made on another machine. The adapter applies it
     // through that same engine; this is not a second store being merged.
     if (event.type === 'memory.change') {

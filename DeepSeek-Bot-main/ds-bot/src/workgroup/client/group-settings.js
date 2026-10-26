@@ -69,6 +69,32 @@ function GroupPermission({ room, catalog, update }) {
       h(PermissionPicker, { catalog, saved: room.permission, onPick: permission => update({ permission }) })) : null)
 }
 
+// One guard a group keeps: how many Bot turns may answer Bot calls since the user
+// last wrote in it, after which the group pauses until the user goes on or writes.
+function RelayLimitRow({ room, update }) {
+  const [draft, setDraft] = useState(room.relayLimit ?? '')
+  useEffect(() => setDraft(room.relayLimit ?? ''), [room.relayLimit])
+  const save = () => {
+    const text = String(draft).trim()
+    if (text === '') {
+      if (room.relayLimit !== undefined && room.relayLimit !== null) update({ relayLimit: null })
+      return
+    }
+    const limit = Number(text)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200 || limit === room.relayLimit) { setDraft(room.relayLimit ?? ''); return }
+    update({ relayLimit: limit })
+  }
+  return h(Row, { label: t('Pause Bot relays after'), hint: t('Counted since your last message in this group.') },
+    h('input', {
+      className: 'bt-bs-input bt-bs-num', type: 'number', min: 1, max: 200,
+      placeholder: String(room.relayLimitDefault ?? ''), value: draft,
+      'aria-label': t('Pause Bot relays after'),
+      onChange: event => setDraft(event.target.value),
+      onBlur: save,
+      onKeyDown: event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } },
+    }))
+}
+
 // A group chat's settings as grouped cards: its name and notice, who answers, its
 // members and admin, its permissions, its sidebar place, and deleting it. The user may
 // change all of it; the host enforces what Bots may change.
@@ -111,6 +137,10 @@ export function GroupSettingsForm({ room, roster, actions, run, onDeleted }) {
           onClick: () => { if (mode !== id) void update({ mode: id }) },
         }, t(label)))),
         h('span', { key: mode, className: 'bt-set-hint bt-veil' }, `${t(modeHint)} ${t('@mentions always pick who answers.')}`))),
+    // The group's one guard, copied from the original's RelayLimitRow: how many Bot
+    // turns may answer Bot calls since the user last wrote, before the group pauses.
+    h(Card, { title: t('Bot relays') },
+      h(RelayLimitRow, { room, update })),
     h(Card, { title: t('Working folder') },
       h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Folder'))),
