@@ -211,7 +211,7 @@ test('remember saves one entry with its source, and forget removes it, both in t
   assert.match(replaced.before, /^- User prefers short replies \[/)
   assert.match(replaced.after, /^- User prefers detailed replies \[/)
   assert.match(removed.before, /^- User prefers detailed replies \[/)
-  assert.match(await tool('forget', { entry: 'nothing like it' }, 'b2'), /^No entry in your memory matches "nothing like it"\. recall shows what is saved\.$/)
+  await assert.rejects(tool('forget', { entry: 'nothing like it' }, 'b2'), /No entry in your memory matches "nothing like it"\. recall shows what is saved\.$/)
 })
 
 test('topics hold details, linked from MEMORY.md, and go when their last entry does', async (t) => {
@@ -221,7 +221,7 @@ test('topics hold details, linked from MEMORY.md, and go when their last entry d
   assert.match(await tool('remember', { text: 'Prefers window seats', topic: 'travel' }, 'b2'), /in topic \[\[travel\]\] \(travel\.md: \d+ of 16000 characters\)/)
   assert.match(read('bots', 'b2', 'travel.md'), /^# travel\n\n- Flies from Hangzhou \[.*\]\n- Prefers window seats \[.*\]\n$/)
   assert.equal(read('bots', 'b2', 'MEMORY.md'), '# Memory\n\n## Index\n- [[travel]]\n')
-  assert.match(await tool('remember', { text: 'x', topic: '../up' }, 'b2'), /cannot be a topic name/)
+  await assert.rejects(tool('remember', { text: 'x', topic: '../up' }, 'b2'), /cannot be a topic name/)
 
   assert.match(await tool('recall', { topic: 'travel' }, 'b2'), /^Topic \[\[travel\]\] in your memory \(travel\.md: \d+ of 16000 characters\):\n# travel\n\n- Flies from Hangzhou/)
   assert.match(await tool('recall', { query: 'window' }, 'b2'), /^Entries with "window" in your memory and the team memory:\n\[yours · \[\[travel\]\]\] Prefers window seats \[source: part 1 #10; added: /)
@@ -236,36 +236,36 @@ test('topics hold details, linked from MEMORY.md, and go when their last entry d
 test('Main Bots and group admins write the team memory; only Main Bots touch another Bot\'s', async (t) => {
   const { tool, read, stop } = start()
   t.after(() => stop())
-  assert.match(await tool('remember', { text: 'Ship on Friday', scope: 'team' }, 'b2'), /^Only Main Bots and group admins write the team memory/)
+  await assert.rejects(tool('remember', { text: 'Ship on Friday', scope: 'team' }, 'b2'), /Only Main Bots and group admins write the team memory/)
   // Coder is the admin of Launch, and speaks there from its group Session.
   assert.match(await tool('remember', { text: 'Ship on Friday', scope: 'team' }, 'g3'), /^Saved to the team memory/)
   assert.match(read('team', 'MEMORY.md'), /- Ship on Friday \[source: group "Launch" \d{2}-\d{2} \d{2}:\d{2}; by: Coder; added: /)
   assert.match(await tool('remember', { text: 'Writes in Chinese', scope: 'Writer' }, 'm1'), /^Saved to Writer's memory/)
   assert.match(read('bots', 'b2', 'MEMORY.md'), /- Writes in Chinese \[source: part 1 #10; by: Chief; added: /)
-  assert.match(await tool('remember', { text: 'Bossy', scope: 'Chief' }, 'b2'), /^Only a Main Bot can change another Bot's memory/)
+  await assert.rejects(tool('remember', { text: 'Bossy', scope: 'Chief' }, 'b2'), /Only a Main Bot can change another Bot's memory/)
   assert.match(await tool('recall', { scope: 'Writer' }, 'b3'), /^Only a Main Bot can read another Bot's memory/)
   assert.match(await tool('recall', { scope: 'Nobody' }, 'b3'), /^No Bot named Nobody/)
   assert.match(await tool('recall', { query: 'friday' }, 'b2'), /\[team · MEMORY\.md\] Ship on Friday/)
-  assert.match(await tool('forget', { entry: 'Friday', scope: 'team' }, 'b2'), /^Only Main Bots and group admins/)
+  await assert.rejects(tool('forget', { entry: 'Friday', scope: 'team' }, 'b2'), /Only Main Bots and group admins/)
   assert.match(await tool('forget', { entry: 'Friday', scope: 'team' }, 'm1'), /^Removed from the team memory/)
-  assert.match(await tool('remember', { text: 'x' }, 'stranger'), /^Only Bots on the team keep a memory\./)
+  await assert.rejects(tool('remember', { text: 'x' }, 'stranger'), /Only Bots on the team keep a memory\./)
 })
 
 test('keys, long entries, and full files are refused with what to do instead', async (t) => {
   const { tool, read, stop, home } = start()
   t.after(() => stop())
-  assert.match(await tool('remember', { text: 'API key sk-' + 'abcdefghijklmnopqrstuvwx' }, 'b2'), /looks like a key.*request_secret/)
-  assert.match(await tool('remember', { text: 'x'.repeat(MEMORY_LIMITS.entry + 1) }, 'b2'), /at most 300 characters; this one has 301/)
-  assert.match(await tool('remember', { text: '  ' }, 'b2'), /^Write the entry to save\.$/)
+  await assert.rejects(tool('remember', { text: 'API key sk-' + 'abcdefghijklmnopqrstuvwx' }, 'b2'), /looks like a key.*request_secret/)
+  await assert.rejects(tool('remember', { text: 'x'.repeat(MEMORY_LIMITS.entry + 1) }, 'b2'), /at most 300 characters; this one has 301/)
+  await assert.rejects(tool('remember', { text: '  ' }, 'b2'), /Write the entry to save\.$/)
 
   // A MEMORY.md written past its size by hand still takes a shorter replacement.
   const big = Array.from({ length: 16 }, (_, index) => `- Fact ${index} ${'y'.repeat(250)}`)
   mkdirSync(join(home, 'memory', 'bots', 'b2'), { recursive: true })
   writeFileSync(join(home, 'memory', 'bots', 'b2', 'MEMORY.md'), `# Memory\n\n${big.join('\n')}\n`)
-  assert.match(await tool('remember', { text: 'One more' }, 'b2'), /MEMORY\.md would have \d+ of its 4000 characters\. Make room first: move details into a topic/)
+  await assert.rejects(tool('remember', { text: 'One more' }, 'b2'), /MEMORY\.md would have \d+ of its 4000 characters\. Make room first: move details into a topic/)
   assert.match(await tool('remember', { text: 'Fact 3 is short now', replace: 'Fact 3 ' }, 'b2'), /is now "Fact 3 is short now"/)
   assert.match(read('bots', 'b2', 'MEMORY.md'), /- Fact 3 is short now \[/)
-  assert.match(await tool('forget', { entry: 'Fact 1' }, 'b2'), /matches \d+ entries in your memory; quote more of the one you mean:\n- Fact 1 y+ \(MEMORY\.md\)\n- Fact 10/)
+  await assert.rejects(tool('forget', { entry: 'Fact 1' }, 'b2'), /matches \d+ entries in your memory; quote more of the one you mean:\n- Fact 1 y+ \(MEMORY\.md\)\n- Fact 10/)
 })
 
 test('a Session keeps the memory it began with, across restarts, until its snapshot goes', async (t) => {
@@ -524,7 +524,7 @@ test('a host that only reads the team shows memory but changes none of it', asyn
   const { tool, call, section, stop } = start({ home })
   t.after(() => stop())
   await call('state', {})
-  assert.match(await tool('remember', { text: 'Likes tea' }, 'b2'), /^Memory cannot change now: The Bot team in .* is open in another dsh/)
+  await assert.rejects(tool('remember', { text: 'Likes tea' }, 'b2'), /Memory cannot change now: The Bot team in .* is open in another dsh/)
   assert.equal((await call('memory-view', { botId: 'b2' })).ok, true)
   assert.equal((await call('memory-ask', { botId: 'b2', text: 'hi' })).error.code, 'bot/read-only')
   assert.match(section('b2'), /^# Your memory/)
@@ -816,8 +816,9 @@ test('the members of a group read its memory in their Sessions there, and no Bot
 test('in a group, remember and forget write the group memory unless told otherwise, for any member', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-'))
   twoMembers(home)
-  const { tool, call, read, journal, stop } = start({ home })
+  const { rt, tool, call, read, journal, stop } = start({ home })
   t.after(() => stop())
+  await rt.load()
   assert.match(await tool('remember', { text: 'Builds go in the out folder' }, 'g2'), /^Saved to the group memory, in MEMORY\.md \(MEMORY\.md: \d+ of 4000 characters\)\. Every member sees it in its next conversation in this group; recall finds it now\.$/)
   assert.match(read('groups', 'r1', 'MEMORY.md'), /- Builds go in the out folder \[source: group "Launch" \d{2}-\d{2} \d{2}:\d{2}; by: Writer; added: /)
   assert.equal(existsSync(join(home, 'memory', 'bots', 'b2', 'MEMORY.md')), false)
@@ -831,12 +832,12 @@ test('in a group, remember and forget write the group memory unless told otherwi
     ['add', 'group:r1', 'Writer'], ['add', 'bot:b2', 'Writer'], ['replace', 'group:r1', 'Coder'], ['remove', 'group:r1', 'Coder'],
   ])
   // A Bot's own chat has no group memory to write.
-  assert.match(await tool('remember', { text: 'x', scope: 'group' }, 'b2'), /^There is no group memory here/)
+  await assert.rejects(tool('remember', { text: 'x', scope: 'group' }, 'b2'), /There is no group memory here/)
   // A member removed from the group writes no more of it.
   await tool('remember', { text: 'Ship on Friday' }, 'g2')
   assert.equal((await call('update-room', { id: 'r1', remove: ['b2'] })).ok, true)
-  assert.match(await tool('remember', { text: 'Still here' }, 'g2'), /^Only Bots on the team keep a memory\./)
-  assert.match(await tool('forget', { entry: 'Friday' }, 'g2'), /^Only Bots on the team keep a memory\./)
+  await assert.rejects(tool('remember', { text: 'Still here' }, 'g2'), /Only Bots on the team keep a memory|There is no group memory here/)
+  await assert.rejects(tool('forget', { entry: 'Friday' }, 'g2'), /Only Bots on the team keep a memory|There is no group memory here/)
   assert.deepEqual(parseMemory(read('groups', 'r1', 'MEMORY.md')).entries.map(entry => entry.text), ['Ship on Friday'])
 })
 

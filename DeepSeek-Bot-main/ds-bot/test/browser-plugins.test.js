@@ -32,7 +32,7 @@ function start(config, { services = {}, team = TEAM } = {}) {
   let route
   const register = ctx.connection.fetch.register
   ctx.connection.fetch.register = options => {
-    route = options
+    if (options.path === '/api/bot') route = options
     return register(options)
   }
   const rt = createRuntime(ctx, { home, ...config })

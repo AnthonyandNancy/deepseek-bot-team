@@ -77,6 +77,7 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'on agent/inbox/discarded',
     'on session/event',
     'effect ds-bot: resume interrupted turns',
+    'effect ds-bot: memory recovery',
     'effect ds-bot: memory section',
     'prompt bot-memory 645',
     'tool remember',
@@ -211,7 +212,7 @@ test('in the Desktop profile read_browser is the last tool and reads through the
   const poll = call('browser-wait', { clientId: 'w1', open: { b2: { url: 'https://example.com/', title: 'Example' }, nope: { url: 'https://x/' } } })
   await new Promise(resolve => setTimeout(resolve, 10))
   const reading = read({})
-  const requests = (await poll).value
+  const requests = (await poll).value.requests
   assert.deepEqual(requests.map(request => request.botId), ['b2'])
   assert.deepEqual((await call('browser-result', { id: requests[0].id, ok: true, page: { url: 'https://example.com/', title: 'Example', text: 'Hello from the page', items: [{ role: 'link', name: 'More', href: 'https://example.com/more' }] } })).value, true)
   const text = await reading

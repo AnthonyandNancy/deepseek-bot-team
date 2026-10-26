@@ -141,7 +141,7 @@ async function setup({ state = team(), messages, seq = 4, events, foreignLock = 
   ctx.sessionTitle = { rename: async () => {} }
   let route
   const register = ctx.connection.fetch.register
-  ctx.connection.fetch.register = (options) => { route = options; return register(options) }
+  ctx.connection.fetch.register = (options) => { if (options.path === '/api/bot') route = options; return register(options) }
   const rt = createRuntime(ctx, { home, github: false, diagnosticsFile: false })
   let notices = 0
   const saved = rt.stateSaved
