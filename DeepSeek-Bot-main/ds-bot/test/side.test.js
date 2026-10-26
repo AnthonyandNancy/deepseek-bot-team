@@ -173,7 +173,7 @@ async function setup({ state = team(), scripts = [], gate = false, messages, seq
   ctx.sessionTitle = { rename: async () => {} }
   let route
   const register = ctx.connection.fetch.register
-  ctx.connection.fetch.register = (options) => { route = options; return register(options) }
+  ctx.connection.fetch.register = (options) => { if (options.path === '/api/bot') route = options; return register(options) }
   const rt = createRuntime(ctx, { home, github: false, diagnosticsFile: false })
   let notices = 0
   const saved = rt.stateSaved
@@ -281,7 +281,7 @@ test('a side question answers from a snapshot and writes nothing into the sessio
   const file = chatsFile(env.home)
   assert.equal(file.length, 1)
   assert.equal(file[0].entries[0].status, 'done')
-  const meter = env.ctx.listeners.get('llm/stream').at(-1)
+  const meter = env.ctx.listeners.get('llm/stream').find(listener => listener.meter === true)
   for (const options of requests) {
     for await (const chunk of meter(options, async function* () {
       yield { type: 'usage', usage: { inputTokens: 12, outputTokens: 3 } }
