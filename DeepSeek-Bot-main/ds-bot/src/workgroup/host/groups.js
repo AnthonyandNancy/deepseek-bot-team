@@ -2132,8 +2132,9 @@ export function install(wg) {
       const touch = () => {
         clearTimeout(timer)
         timer = setTimeout(() => finish({ missed: true }), WG_REPLY_TIMEOUT_MS)
+        timer.unref?.()
       }
-      const work = () => { grace ??= setTimeout(() => finish({ working: true }), WG_WORK_GRACE_MS) }
+      const work = () => { grace ??= setTimeout(() => finish({ working: true }), WG_WORK_GRACE_MS); grace.unref?.() }
       const say = (raw) => {
         const step = stripOwnName(member.name, raw)
         if (isPass(step)) return
