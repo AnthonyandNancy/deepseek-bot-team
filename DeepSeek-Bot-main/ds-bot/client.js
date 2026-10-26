@@ -9867,6 +9867,7 @@ function RoomRow2({ room: room2, roster, actions, useSessions, useSessionStatus,
       "aria-label": label,
       "aria-current": active ? "page" : void 0,
       "data-room-id": id,
+      title: room2.name,
       onClick: () => actions.openSession(id),
       onContextMenu: (event) => {
         event.preventDefault();
