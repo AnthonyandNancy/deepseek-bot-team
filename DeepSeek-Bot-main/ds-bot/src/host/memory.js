@@ -480,6 +480,8 @@ export function install(rt) {
   // The group a Session speaks in, an earlier part of it included: none for a Bot's
   // own chat. Writes check membership again, so a member that has left writes nothing.
   const roomIdOf = sessionId => rt.groupOwners.get(sessionId)?.roomId ?? rt.pastOwners.get(sessionId)?.roomId ?? rt.memoryRoomOf?.(sessionId)
+  // A room by id, whichever domain owns it: local rooms first, then the workgroup seam.
+  const roomOf = roomId => rt.roomOf(roomId) ?? rt.workgroupRoomOf?.(roomId)
   // The Bot whose model keeps a group's memory: its admin, else its first member.
   const keeperOf = room => rt.botOf(room.admin) ?? room.members.map(id => rt.botOf(id)).find(Boolean)
 
@@ -689,7 +691,7 @@ export function install(rt) {
     const botActor = actor?.id === 'user' ? undefined : actor?.id
     const gone = [scope.kind === 'bot' ? scope.botId : undefined, botActor].some(id => id !== undefined && rt.botOf(id) === undefined)
     if (gone) throw Object.assign(new Error('That Bot has been deleted'), { code: GONE })
-    if (scope.kind === 'group' && rt.roomOf(scope.roomId) === undefined) throw Object.assign(new Error('That group chat has been deleted'), { code: GONE })
+    if (scope.kind === 'group' && roomOf(scope.roomId) === undefined) throw Object.assign(new Error('That group chat has been deleted'), { code: GONE })
     const denied = botActor === undefined ? undefined : writeDenied(scope, botActor)
     if (denied !== undefined) throw Object.assign(new Error(denied), { code: DENIED })
   }
@@ -719,7 +721,7 @@ export function install(rt) {
   }
   function writeDenied(scope, botId) {
     if (scope.kind === 'team') return writesTeam(botId) ? undefined : 'Only Main Bots and group admins write the team memory. Tell a Main Bot with message_bot what the team should know.'
-    if (scope.kind === 'group') return rt.roomOf(scope.roomId)?.members.includes(botId) ? undefined : 'Only the members of a group chat write its memory.'
+    if (scope.kind === 'group') return roomOf(scope.roomId)?.members.some(member => (member !== null && typeof member === 'object' ? member.id : member) === botId) ? undefined : 'Only the members of a group chat write its memory.'
     if (scope.botId !== botId && !rt.isMain(botId)) return 'Only a Main Bot can change another Bot\'s memory. Use message_bot to tell that Bot instead.'
     return undefined
   }
@@ -759,41 +761,44 @@ export function install(rt) {
   const noteNews = (scope, actor, op, line) => {
     if (actor.id === 'user') return
     const id = scope.kind === 'team' ? actor.id : scope.kind === 'group' ? scope.roomId : scope.botId
-    if (rt.botOf(id) === undefined && rt.roomOf(id) === undefined) return
+    if (rt.botOf(id) === undefined && roomOf(id) === undefined) return
     news.set(id, { at: Date.now(), op, text: splitMeta(String(line ?? '').replace(/^- /, '')).text.slice(0, NEWS_TEXT_MAX) })
   }
 
-  function addEntry({ scope, topic, text, meta, actor, label }) {
-    return queued(async () => {
-      await recoverPending()
-      writable(scope, actor)
-      const files = loadScope(scope)
-      const [same] = matchEntries(allEntries(files), text).filter(entry => squash(entry.text) === squash(text))
-      if (same !== undefined) return { changed: false, file: same.file, message: `Already in ${label} (${fileName(same.file)}): "${same.text}". Nothing changed.` }
-      const main = files[0]
-      let target = topic === undefined ? main : files.find(file => file.topic === topic)
-      const fresh = target === undefined
-      if (fresh) {
-        if (files.length - 1 >= MEMORY_LIMITS.topics) throw new Error(`${capital(label)} already has ${MEMORY_LIMITS.topics} topics, the most it holds. Add to one of them (recall lists them), or forget one.`)
-        target = { topic, file: `${topic}.md`, path: join(dirOf(scope), `${topic}.md`), content: '', ...parseMemory(`# ${topic}\n`) }
-      }
-      const base = target.lines.length > 0 ? target.lines : parseMemory(target === main ? EMPTY_MAIN : `# ${topic}\n`).lines
-      const line = formatEntry(text, meta)
-      const next = joinLines(insertEntry(base, line))
-      checkSize(target, next, label)
-      let index
-      if (topic !== undefined && !main.links.includes(topic)) {
-        index = joinLines(addLink(main.lines.length > 0 ? main.lines : parseMemory(EMPTY_MAIN).lines, topic))
-        checkSize(main, index, label)
-      }
-      const steps = [writeStep(target.path, next)]
-      if (index !== undefined) steps.push(writeStep(main.path, index))
-      await publish({ op: 'add', scope: scopeKey(scope), steps, row: { op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line } })
-      reportWrite({ scope, file: target, op: 'add', before: undefined, after: line, actor })
-      noteNews(scope, actor, 'add', line)
-      const where = topic === undefined ? MAIN : fresh ? `the new topic [[${topic}]], linked from MEMORY.md` : `topic [[${topic}]]`
-      return { changed: true, file: target, message: `Saved to ${label}, in ${where} (${sizeNote(target, next.length)}).` }
-    })
+  async function addEntryInner({ scope, topic, text, meta, actor, label }) {
+
+    await recoverPending()
+    writable(scope, actor)
+    const files = loadScope(scope)
+    const [same] = matchEntries(allEntries(files), text).filter(entry => squash(entry.text) === squash(text))
+    if (same !== undefined) return { changed: false, file: same.file, message: `Already in ${label} (${fileName(same.file)}): "${same.text}". Nothing changed.` }
+    const main = files[0]
+    let target = topic === undefined ? main : files.find(file => file.topic === topic)
+    const fresh = target === undefined
+    if (fresh) {
+      if (files.length - 1 >= MEMORY_LIMITS.topics) throw new Error(`${capital(label)} already has ${MEMORY_LIMITS.topics} topics, the most it holds. Add to one of them (recall lists them), or forget one.`)
+      target = { topic, file: `${topic}.md`, path: join(dirOf(scope), `${topic}.md`), content: '', ...parseMemory(`# ${topic}\n`) }
+    }
+    const base = target.lines.length > 0 ? target.lines : parseMemory(target === main ? EMPTY_MAIN : `# ${topic}\n`).lines
+    const line = formatEntry(text, meta)
+    const next = joinLines(insertEntry(base, line))
+    checkSize(target, next, label)
+    let index
+    if (topic !== undefined && !main.links.includes(topic)) {
+      index = joinLines(addLink(main.lines.length > 0 ? main.lines : parseMemory(EMPTY_MAIN).lines, topic))
+      checkSize(main, index, label)
+    }
+    const steps = [writeStep(target.path, next)]
+    if (index !== undefined) steps.push(writeStep(main.path, index))
+    await publish({ op: 'add', scope: scopeKey(scope), steps, row: { op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line } })
+    reportWrite({ scope, file: target, op: 'add', before: undefined, after: line, actor })
+    noteNews(scope, actor, 'add', line)
+    const where = topic === undefined ? MAIN : fresh ? `the new topic [[${topic}]], linked from MEMORY.md` : `topic [[${topic}]]`
+    return { changed: true, file: target, message: `Saved to ${label}, in ${where} (${sizeNote(target, next.length)}).` }
+  }
+
+  function addEntry(args) {
+    return queued(() => addEntryInner(args))
   }
 
   // `topic` narrows where to look; undefined looks in every file of the scope.
@@ -809,57 +814,63 @@ export function install(rt) {
   }
 
   // The entry keeps its place; `topic` only narrows where to look.
-  function replaceEntry({ scope, topic, match, text, meta, actor, label }) {
-    return queued(async () => {
-      await recoverPending()
-      writable(scope, actor)
-      const old = findOne(loadScope(scope), topic, match, label)
-      const line = formatEntry(text, meta)
-      const lines = [...old.file.lines]
-      const before = lines[old.line]
-      lines[old.line] = line
-      const next = joinLines(lines)
-      checkSize(old.file, next, label)
-      await publish({
-        op: 'replace',
-        scope: scopeKey(scope),
-        steps: [writeStep(old.file.path, next)],
-        row: { op: 'replace', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, after: line },
-      })
-      reportWrite({ scope, file: old.file, op: 'replace', before, after: line, actor })
-      noteNews(scope, actor, 'replace', line)
-      return { changed: true, file: old.file, message: `Updated in ${label} (${fileName(old.file)}): "${old.text}" is now "${text}".` }
+  async function replaceEntryInner({ scope, topic, match, text, meta, actor, label }) {
+
+    await recoverPending()
+    writable(scope, actor)
+    const old = findOne(loadScope(scope), topic, match, label)
+    const line = formatEntry(text, meta)
+    const lines = [...old.file.lines]
+    const before = lines[old.line]
+    lines[old.line] = line
+    const next = joinLines(lines)
+    checkSize(old.file, next, label)
+    await publish({
+      op: 'replace',
+      scope: scopeKey(scope),
+      steps: [writeStep(old.file.path, next)],
+      row: { op: 'replace', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, after: line },
     })
+    reportWrite({ scope, file: old.file, op: 'replace', before, after: line, actor })
+    noteNews(scope, actor, 'replace', line)
+    return { changed: true, file: old.file, message: `Updated in ${label} (${fileName(old.file)}): "${old.text}" is now "${text}".` }
   }
 
-  function removeEntry({ scope, topic, match, actor, label }) {
-    return queued(async () => {
-      await recoverPending()
-      writable(scope, actor)
-      const files = loadScope(scope)
-      const old = findOne(files, topic, match, label)
-      const before = old.file.lines[old.line]
-      const lines = old.file.lines.filter((_line, index) => index !== old.line)
-      // A topic left with nothing but its title goes, and so does its link.
-      const empty = old.file.topic !== undefined && lines.every(line => line.trim() === '' || HEADING.test(line))
-      const steps = []
-      if (empty) {
-        steps.push(removeStep(old.file.path))
-        const main = files[0]
-        if (main.links.includes(old.file.topic)) steps.push(writeStep(main.path, joinLines(removeLink(main.lines, old.file.topic))))
-      } else {
-        steps.push(writeStep(old.file.path, joinLines(lines)))
-      }
-      await publish({
-        op: 'remove',
-        scope: scopeKey(scope),
-        steps,
-        row: { op: 'remove', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, ...(empty ? { removedTopic: true } : {}) },
-      })
-      reportWrite({ scope, file: old.file, op: 'remove', before, after: undefined, actor })
-      noteNews(scope, actor, 'remove', before)
-      return { changed: true, file: old.file, message: `Removed from ${label} (${fileName(old.file)}): "${old.text}", all of it, so save again with remember any part that is still true. The change log keeps a copy.${empty ? ` The topic [[${old.file.topic}]] was empty, so it is gone too.` : ''}` }
+  function replaceEntry(args) {
+    return queued(() => replaceEntryInner(args))
+  }
+
+  async function removeEntryInner({ scope, topic, match, actor, label }) {
+
+    await recoverPending()
+    writable(scope, actor)
+    const files = loadScope(scope)
+    const old = findOne(files, topic, match, label)
+    const before = old.file.lines[old.line]
+    const lines = old.file.lines.filter((_line, index) => index !== old.line)
+    // A topic left with nothing but its title goes, and so does its link.
+    const empty = old.file.topic !== undefined && lines.every(line => line.trim() === '' || HEADING.test(line))
+    const steps = []
+    if (empty) {
+      steps.push(removeStep(old.file.path))
+      const main = files[0]
+      if (main.links.includes(old.file.topic)) steps.push(writeStep(main.path, joinLines(removeLink(main.lines, old.file.topic))))
+    } else {
+      steps.push(writeStep(old.file.path, joinLines(lines)))
+    }
+    await publish({
+      op: 'remove',
+      scope: scopeKey(scope),
+      steps,
+      row: { op: 'remove', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, ...(empty ? { removedTopic: true } : {}) },
     })
+    reportWrite({ scope, file: old.file, op: 'remove', before, after: undefined, actor })
+    noteNews(scope, actor, 'remove', before)
+    return { changed: true, file: old.file, message: `Removed from ${label} (${fileName(old.file)}): "${old.text}", all of it, so save again with remember any part that is still true. The change log keeps a copy.${empty ? ` The topic [[${old.file.topic}]] was empty, so it is gone too.` : ''}` }
+  }
+
+  function removeEntry(args) {
+    return queued(() => removeEntryInner(args))
   }
 
   // ── a change made on another machine ─────────────────────────────────────────
@@ -897,7 +908,6 @@ export function install(rt) {
     const changeActor = remoteName === undefined ? USER : { id: 'user', name: remoteName }
     const label = labelOf(scope, 'user')
     const applyInner = async () => {
-      await recoverPending()
       const topicName = typeof topic === 'string' && topic !== '' ? topic : undefined
       // `before` is the full line the sender's journal recorded, including its metadata. The local
       // copy has different metadata (its own source and date), so match on the entry text; that is
@@ -907,14 +917,14 @@ export function install(rt) {
       if (op === 'add') {
         const parsed = splitMeta(String(after ?? '').replace(/^- /, ''))
         if (parsed.text === '') return { changed: false, reason: 'invalid' }
-        result = await addEntry({ scope, topic: topicName, text: parsed.text, meta: parsed.meta, actor: changeActor, label })
+        result = await addEntryInner({ scope, topic: topicName, text: parsed.text, meta: parsed.meta, actor: changeActor, label })
       } else if (op === 'replace') {
         const parsed = splitMeta(String(after ?? '').replace(/^- /, ''))
         if (beforeText === '' || parsed.text === '') return { changed: false, reason: 'invalid' }
-        result = await replaceEntry({ scope, topic: topicName, match: beforeText, text: parsed.text, meta: parsed.meta, actor: changeActor, label })
+        result = await replaceEntryInner({ scope, topic: topicName, match: beforeText, text: parsed.text, meta: parsed.meta, actor: changeActor, label })
       } else {
         if (beforeText === '') return { changed: false, reason: 'invalid' }
-        result = await removeEntry({ scope, topic: topicName, match: beforeText, actor: changeActor, label })
+        result = await removeEntryInner({ scope, topic: topicName, match: beforeText, actor: changeActor, label })
       }
       appliedNow().push(eventId)
       if (appliedNow().length > APPLIED_MEMORY_MAX) appliedNow().splice(0, appliedNow().length - APPLIED_MEMORY_MAX)
@@ -924,7 +934,6 @@ export function install(rt) {
       return { changed: result.changed === true, result }
     }
     return queued(async () => {
-      await rt.load()
       if (appliedNow().includes(eventId)) return { changed: false, reason: 'duplicate' }
       // The writer is a member of the group on the Hub, resolved by the adapter to a member of this
       // machine's room. A room that has been deleted here is still refused by the original check.
@@ -1424,7 +1433,7 @@ export function install(rt) {
   // left with no Bot has no keeper: its entries still show and can be removed.
   function panelOf(body) {
     if (body.roomId !== undefined && body.roomId !== null) {
-      const room = rt.roomOf(String(body.roomId))
+      const room = roomOf(String(body.roomId))
       if (room === undefined) throw new Error('Unknown group chat')
       return { id: room.id, name: room.name, group: true, keeper: keeperOf(room), tag: { sessionId: room.id, kind: 'memory' }, scopes: { group: groupScope(room.id) } }
     }
