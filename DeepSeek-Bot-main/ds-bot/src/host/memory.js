@@ -934,6 +934,7 @@ export function install(rt) {
       return { changed: result.changed === true, result }
     }
     return queued(async () => {
+      await rt.load()
       if (appliedNow().includes(eventId)) return { changed: false, reason: 'duplicate' }
       // The writer is a member of the group on the Hub, resolved by the adapter to a member of this
       // machine's room. A room that has been deleted here is still refused by the original check.
