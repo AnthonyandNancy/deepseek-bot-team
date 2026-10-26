@@ -568,3 +568,11 @@ ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
 3. G6：群记忆（`group_memories`）、重启恢复、完整验收与交付。
 4. 缺口 16、23、24（人员显示名、谁正在看、跨机工作态）按需排期。
 5. 有 DSH checkout 时补跑 `dev/bench.sh smoke`。
+
+## 2026-10-26 上游同步水位
+
+- 上游 `DS-Bot v0.2.2` 已合并到 `chore/sync-upstream-v0.2.2`，包含 relay 暂停/继续、memory pending、Side chat、browser、widget 等能力。
+- 本地插件为 `0.2.8`；没有把版本号降成 `0.2.2`。
+- 工作群副本已同步 relay 上限与 Continue；Hub 新增 `group.continue` 事件，不计未读。
+- 自动验证：ds-bot 全量 1464 tests / 1463 pass / 0 fail / 1 skip；Hub 270/270；build、lint、pack 通过。
+- 仍需人工：双机 Continue、桌面安装包实际运行；工作群 Hub/WebSocket 测试需要 `--test-force-exit` 才能结束进程。

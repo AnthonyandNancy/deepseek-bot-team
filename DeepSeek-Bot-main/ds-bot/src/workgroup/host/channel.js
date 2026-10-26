@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 // The Workgroup client channel: the POST /api/workgroup endpoints the workgroup UI
 // calls. Deliberately a separate route from the original's /api/bot (P0-18) so the two
 // clients can never address each other's state by mistake.
@@ -97,6 +98,9 @@ export function install(wg) {
       })),
       members: room.members ?? [],
       adminId: room.adminId ?? null,
+      relayLimit: room.relayLimit ?? null,
+      relayLimitDefault: 3 * (room.members ?? []).filter(member => member.kind !== 'user').length,
+      paused: room.paused ?? [],
       // Unread counts MESSAGES above the cursor, not the distance between two seq numbers.
       //
       // The Hub allocates one `seq` stream for the whole group, and G5 puts task, approval and
@@ -277,7 +281,7 @@ export function install(wg) {
           // `room.admin` field could not be reused). `permission` is the group's own
           // preset, and only the user may set it — `updateWorkgroup` enforces that,
           // because this endpoint calls it with no actor.
-          for (const key of ['name', 'notice', 'mode', 'permission', 'workDir', 'lead']) if (body[key] !== undefined) patch[key] = body[key]
+          for (const key of ['name', 'notice', 'mode', 'permission', 'workDir', 'lead', 'relayLimit']) if (body[key] !== undefined) patch[key] = body[key]
           if (body.adminId !== undefined) patch.adminId = body.adminId
           // The original's field name is `admin`; accept both so either caller works.
           if (body.admin !== undefined && body.adminId === undefined) patch.adminId = body.admin
@@ -408,6 +412,19 @@ export function install(wg) {
 
         case 'stop-round': {
           return ok(await wg.stopRound(String(body.roomId ?? '')))
+        }
+
+        case 'continue-room': {
+          const result = await wg.continueRoom(String(body.roomId ?? ''))
+          if (result !== false && result?.hubWorkgroupId) {
+            await wg.bridge?.sendEvent?.({
+              workgroupId: result.hubWorkgroupId,
+              frameType: 'group.continue',
+              eventId: `gce_${randomUUID().replace(/-/g, '')}`,
+              payload: { roomKey: result.hubWorkgroupId, at: new Date().toISOString() },
+            }).catch(() => {})
+          }
+          return ok(result === false ? await roomView(String(body.roomId ?? '')) : await roomView(result.roomId))
         }
 
         // COPY OF THE ORIGINAL `stop-member-work`: stop one member of a round, not the

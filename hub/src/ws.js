@@ -199,6 +199,26 @@ export function createWsService({ server, auth, devices, logger, workgroups, eve
       }
     },
 
+    'group.continue'(ws, info, message) {
+      const workgroupId = requireGroup(ws, info, message.workgroupId)
+      if (workgroupId === undefined) return undefined
+      try {
+        const { event, duplicate } = events.append({
+          workgroupId,
+          eventId: message.eventId,
+          type: 'group.continue',
+          sender: { userId: info.userId, deviceId: info.deviceId, botEndpointId: message.botEndpointId },
+          payload: message.payload,
+        })
+        send(ws, { type: 'ack.ok', workgroupId, eventId: event.eventId, seq: event.seq, duplicate })
+        if (!duplicate) fanOut(workgroupId, event, { exceptDeviceId: info.deviceId })
+        return undefined
+      } catch (error) {
+        if (error instanceof HubError) return refuse(ws, error.code, error.message)
+        throw error
+      }
+    },
+
     'memory.change'(ws, info, message) {
       const workgroupId = requireGroup(ws, info, message.workgroupId)
       if (workgroupId === undefined) return undefined

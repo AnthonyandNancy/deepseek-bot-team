@@ -104,3 +104,11 @@ done
 ## 4. 测试文件
 
 `test/` 下新增 9 个工作群测试与 `client-render.mjs`；20 个既有测试改为按 `options.path === '/api/bot'` 捕获路由，`usage`/`secrets`/`feed` 按监听器标记选取，`install`/`agents` 把工作群自有工具与注册调用纳入断言。这些是夹具适配，不改变产品行为。
+
+## 3.2 “原版没有 → 新写”补充：group.continue（2026-10-26）
+
+| 新写模块 | 原版最接近的实现 | 为什么不能复用或改复制件 | 判定 |
+|---|---|---|---|
+| `hub/src/ws.js` 的 `group.continue` 处理器 | `hub/src/ws.js` 的 `memory.change` 处理器 | Hub 已有点对点事件流与 `events` 表；Continue 只是把本机暂停状态转成跨机恢复信号，不新增表、不解释业务规则 | ✅ 传输层新增 |
+| `src/workgroup/host/channel.js` 的 `continue-room` | `src/host/channel.js` 的 `room-continue` | 工作群有自己的 `/api/workgroup` 路由与房间 id，不能把工作群 id 交给原版路由 | ✅ 复制件适配 |
+| `src/workgroup/client/group-settings.js` 的 `RelayLimitRow` | `src/client/group-settings.js` 的 `RelayLimitRow` | 工作群成员是记录对象（含真人与远端 Bot），字段名是 `adminId`；原版表单形状不能直接复用 | ✅ 复制件适配 |

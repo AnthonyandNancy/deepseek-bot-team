@@ -299,7 +299,7 @@ test('the settings form writes the Hub setting that makes the admin receive plai
   // them as this domain's own and the host pushes them to the Hub. A report of "not synced" has to
   // fail here before it can be called a transport problem.
   const channelSrc = readFileSync(new URL('../src/workgroup/host/channel.js', import.meta.url), 'utf8')
-  assert.match(channelSrc, /for \(const key of \['name', 'notice', 'mode', 'permission', 'workDir', 'lead'\]\)/,
+  assert.match(channelSrc, /for \(const key of \['name', 'notice', 'mode', 'permission', 'workDir', 'lead', 'relayLimit'\]\)/,
     'update-room forwards the reply mode')
   assert.match(channelSrc, /if \(body\.admin !== undefined && body\.adminId === undefined\) patch\.adminId = body\.admin/,
     "and the admin under this domain's field name")

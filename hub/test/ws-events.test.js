@@ -510,6 +510,35 @@ test('subscribing narrows the fan-out to the named groups', async (t) => {
     'an unsubscribed group must not be pushed')
 })
 
+test('a group.continue control frame fans out without raising unread or becoming a chat line', async (t) => {
+  const { hub, alice, bob, workgroupId } = await setup(t)
+  const a = connect(hub, alice)
+  const b = connect(hub, bob)
+  t.after(() => Promise.all([a.close(), b.close()]))
+  await a.hello()
+  await b.hello()
+
+  const before = await hub.get(`/v1/workgroups/${workgroupId}`, { token: bob.token })
+  const unreadBefore = before.body.unreadCount
+  const eventId = 'gce-ws-1'
+  const from = a.cursor
+  a.send({
+    type: 'group.continue',
+    workgroupId,
+    eventId,
+    payload: { roomKey: workgroupId, at: '2026-10-24T00:00:00.000Z' },
+  })
+  const ack = await a.next(message => message.type === 'ack.ok' && message.eventId === eventId, { label: 'continue ack', from })
+  assert.equal(ack.duplicate, false)
+  const received = await b.next(message => message.type === 'event' && message.event.eventId === eventId)
+  assert.equal(received.event.type, 'group.continue')
+  assert.deepEqual(received.event.payload, { roomKey: workgroupId, at: '2026-10-24T00:00:00.000Z' })
+  const after = await hub.get(`/v1/workgroups/${workgroupId}`, { token: bob.token })
+  assert.equal(after.body.unreadCount, unreadBefore, 'a control frame is not a message')
+  const { EVENT_TYPES } = await import('../src/workgroups/service.js')
+  assert.equal(EVENT_TYPES.has('group.continue'), true)
+})
+
 test('a memory.change fans out on the existing sequence and never counts as unread', async (t) => {
   const { hub, alice, bob, workgroupId } = await setup(t)
   const a = connect(hub, alice)

@@ -162,3 +162,10 @@ git diff --stat ds-bot/src/host/
 - [ ] 本文 §2 的 17 个函数，工作群侧都能找到（改名表在 §2）
 - [ ] 本文 §3 的 9 个回合状态方法，工作群用的是 `wg.*` 而非 `rt.*`（剥注释后计数应为 0；注释里提到 `rt.*` 是对照说明，不算）
 - [ ] 若发现要改原版：停，写「Plan 偏差」，把那段复制进副本
+
+## 2026-10-26 更新：上游 0.2.2 与工作群 Continue
+
+- 上游基线已同步到 `v0.2.2`；本地插件版本保持 `0.2.8`，两者不是同一版本号。
+- 原版 `groups.js` 新增 `defaultRelayLimit`、`relayLimit`、`room.paused`、`continueRoom`；工作群副本已在 `src/workgroup/host/groups.js` 同步这些语义。
+- 工作群新增传输面：`continue-room`（通道）、`group.continue`（Hub 事件）、`RelayLimitRow` 与 `Continue`（客户端）。这些是复制件/传输适配，不是第二套群聊引擎。
+- `client.js` 由 `npm run build` 重新生成。

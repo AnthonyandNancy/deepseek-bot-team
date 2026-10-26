@@ -57,6 +57,8 @@ export const EVENT_TYPES = new Set([
   // One change the ORIGINAL memory engine already made on the machine that made it.
   // The Hub stores and orders it; it never interprets the entry, its format or who may write.
   'memory.change',
+  // A Continue from a peer machine: the coordinator runs calls the relay limit parked.
+  'group.continue',
 ])
 
 // The one event type a person is reading. Unread is a count of THESE, never a difference of `seq`:
