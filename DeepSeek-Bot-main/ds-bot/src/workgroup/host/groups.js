@@ -1250,6 +1250,12 @@ export function install(wg) {
         throw new Error(error?.message ?? String(error))
       })
     }
+    // A deleted group's knowledge must not survive as a local folder that a later room with the
+    // same id could read. The original `deleteRoom` archives group memory for exactly this reason
+    // (`src/host/roster.js:484`); this copy was missing that call. It runs before the member
+    // Sessions leave the record, because the archive reads their snapshots.
+    await Promise.resolve(rt.archiveGroupMemory?.(room))
+      .catch(error => rt.warn('ds-bot: memory of workgroup %s not archived: %s', room.name, error?.message ?? error))
     // A member's Session is released with the group, and archived the way the
     // original does it, so no turn goes on working for a group that is gone.
     for (const sessionId of Object.values(room.sessions ?? {})) {
@@ -1654,12 +1660,17 @@ export function install(wg) {
       ? member?.name ?? payload.senderName ?? payload.endpointName ?? senderEndpointId ?? 'Bot'
       : member?.name ?? payload.senderName ?? payload.endpointName ?? 'A member'
     const memberId = member?.id ?? (fromBot ? (senderEndpointId ?? senderId ?? 'remote') : senderId ?? 'remote')
+    const displayText = files.length === 0
+      ? text
+      : text === ''
+        ? `[${files.map(file => file.name).join(', ')}]`
+        : `${text}
+[${files.map(file => file.name).join(', ')}]`
 
     appendLine(room, {
       who: name,
       memberId,
-      text: files.length === 0 ? text : text === '' ? `[${files.map(file => file.name).join(', ')}]` : `${text}
-[${files.map(file => file.name).join(', ')}]`,
+      text: displayText,
       // Marked so the UI and a later phase can tell a line that crossed the Hub from one this
       // machine produced. It is a display fact, not a permission.
       via: 'hub',
@@ -1708,38 +1719,43 @@ export function install(wg) {
     if (mine === true && senderEndpointId === undefined && reconcile !== true) {
       // Attributed to the user and queued through the same door the local composer uses, so the
       // round this starts is the one `openingSpeakers` already knows how to pick members for.
-      await wg.postToSession?.(room, text, files.length === 0 ? {} : { files })
-    } else if (reconcile !== true && (senderEndpointId !== undefined || member?.kind === 'remoteBot')) {
-      // SOMEBODY ELSE'S BOT SAID THIS, AND THIS MACHINE'S CHAT HAS TO SHOW IT.
-      //
-      // The rule above ("a foreign line never enters the group Session") is what stops a second
-      // round, and it was ALSO what kept the colleague's Bot out of this machine's conversation:
-      // the line reached the log the panel draws, but the group's own Session — which is the chat
-      // surface the user actually reads — never saw it. The result is the reported 「邀请同事加入
-      // 后，消息并没有实时更新」: the message was on the Hub, on this machine's disk, and not on
-      // the screen.
-      //
-      // A Bot's line is a MEMBER POST, not view-only history. The original opens the next speaking
-      // slot from the words the current member posted (`runRound` -> `mentionsIn` -> `callMembers`);
-      // a workgroup member may have answered on another machine, so that line arrives here through
-      // the Hub. Labelling it `role: 'remote'` kept it out of the relay and broke the chain after its
-      // first hop: the colleague's Bot answered, but the member it named on THIS machine was never
-      // called. `role: 'post'` is the same opener a local member's answer uses, so the copied
-      // `openingSpeakers` selects the next speaker without inventing a second round algorithm.
-      //
-      // It still does not re-run the round that produced it: the line is already logged (`remote`),
-      // and the relay only opens from this line's own `@` mentions. A PERSON's line is left out on
-      // purpose — their chat is drawn from `user/message`, and a second copy would show it twice.
-      await postToGroupSession(room, { id: memberId, name }, text, {
-        remote: true,
-        form: 'remote',
-        role: 'post',
-        // A member's post only calls the members it NAMES. Without this flag `openingSpeakers`
-        // reads the opener as the user speaking and `admin` mode asks the admin for a line that
-        // merely answered somebody else — the duplicate/hand-off drift the original never has.
-        member: true,
+      await wg.postToSession?.(room, text, {
         ...(files.length === 0 ? {} : { files }),
-      }).catch(error => rt.warn('ds-bot: line from %s not shown in %s: %s', name, room.name, error?.message ?? error))
+        logged: room.seq,
+      })
+    } else if (reconcile !== true) {
+      // ANY OTHER CROSS-MACHINE LINE IS SHOWN, NOT RE-PLAYED.
+      //
+      // The conversation the user opens is the group's own Session, not this domain's log, so a
+      // line from another machine must be written there to be readable. A PERSON runs no turn, and
+      // a MATCHED Bot answer is already being continued by the caller's `runRound`; posting either
+      // as a `post` cue would ask the relay to open a second round for the same words. An ordinary
+      // Bot post with no waiter keeps `post` + `member: true`, which is the original member-opener
+      // rule that lets its `@Name` call the next speaker.
+      const closesSlot = fromBot
+        && typeof payload.exchangeId === 'string' && payload.exchangeId !== ''
+        && [...wg.roomProgress.values()].some(round => round.roomId === room.id
+          && round.remoteWaiters?.has(payload.exchangeId))
+      const displayOnly = !fromBot || closesSlot
+      if (displayOnly) {
+        await postToGroupSession(room, { id: memberId, name }, displayText, {
+          remote: true,
+          form: 'remote',
+          role: 'remote',
+          ...(files.length === 0 ? {} : { files }),
+        }).catch(error => rt.warn('ds-bot: line from %s not shown in %s: %s', name, room.name, error?.message ?? error))
+      } else {
+        await postToGroupSession(room, { id: memberId, name }, displayText, {
+          remote: true,
+          form: 'remote',
+          role: 'post',
+          // A member's post only calls the members it NAMES. Without this flag `openingSpeakers`
+          // reads the opener as the user speaking and `admin` mode asks the admin for a line that
+          // merely answered somebody else — the duplicate/hand-off drift the original never has.
+          member: true,
+          ...(files.length === 0 ? {} : { files }),
+        }).catch(error => rt.warn('ds-bot: line from %s not shown in %s: %s', name, room.name, error?.message ?? error))
+      }
     }
     // A REMOTE ANSWER CLOSES THE SLOT THAT CALLED IT.
     //
@@ -1803,7 +1819,10 @@ export function install(wg) {
         ...(extra.files ?? []).map(attachment => ({ type: 'file', attachment })),
         ...(extra.images ?? []).map(attachment => ({ type: 'image', attachment })),
       ],
-      source: { kind: 'user' },
+      source: {
+        kind: 'user',
+        ...(extra.logged === undefined ? {} : { logged: extra.logged }),
+      },
     })
     if (typeof agent.followup === 'function') agent.followup(message)
     else await ctx.sessionController.prompt({ sessionId: room.id, mode: 'queue', content: message.content, source: message.source })
@@ -2933,6 +2952,12 @@ export function install(wg) {
           text,
           ...(post.files === undefined ? {} : { files: post.files }),
         })
+        // A user's line is the one kind the relay appends but no later step mirrors. A member
+        // post is mirrored by `postInRound`/`postToGroupSession`; mirroring it again would
+        // duplicate it.
+        if (post.botId === undefined && post.hubEventId === undefined) {
+          mirrorLine(room, room.log.at(-1))
+        }
       }
       if (posts.some(post => !post.botId && !post.kickoff)) room.lateRounds = 0
       await wg.save()
@@ -3221,7 +3246,12 @@ export function install(wg) {
         const content = Array.isArray(event.data?.content) ? event.data.content : []
         const images = content.filter(block => block?.type === 'image' && !block.offloaded).map(block => block.attachment)
         const files = content.filter(block => block?.type === 'file' && block.attachment !== undefined).map(block => block.attachment)
-        queue({ text: textOf(event.data?.content), ...(images.length > 0 ? { images } : {}), ...(files.length > 0 ? { files } : {}) })
+        queue({
+          text: textOf(event.data?.content),
+          ...(images.length > 0 ? { images } : {}),
+          ...(files.length > 0 ? { files } : {}),
+          ...(typeof source?.logged === 'number' ? { logged: source.logged } : {}),
+        })
       }
       // COPY OF THE ORIGINAL (`turns.js:446`): the kickoff is a cue, never a line.
       else if (source?.kind === WG_SOURCE_KIND && source.role === 'kickoff') queue({ text: '', kickoff: true })

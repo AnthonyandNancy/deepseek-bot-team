@@ -24,6 +24,10 @@ The Bot team:
 3. **Only original material.** Do not copy code, text, icons, logos or graphics from other products or websites. Code under a license compatible with Apache 2.0 is the only exception: say where it comes from and add its notice to the `NOTICE` file.
 4. **`client.js` is generated.** Change `ds-bot/src/client/`, then run `npm run build` and commit both files. Never edit `client.js` by hand.
 5. **Do not touch the user's own DSH data.** The desktop app keeps its data in its own `DSH_HOME`; its import only reads `~/.dsh` and never writes there. The test bench keeps its data in `.dsh-test-<name>/`. Never point a test at `~/.dsh`, at the desktop app's data or at a DSH that the user runs.
+6. **The workgroup copies the original group chat; copy first, never build a parallel one.** `ds-bot/src/workgroup/` is the original group-chat subsystem copied so it can be changed for several accounts, a Hub and remote members. Every workgroup behaviour starts from the original:
+   - if the original already does it, change the copy, or reuse the original through a read-only seam — do not write a second implementation;
+   - if the original does not do it, write it, and record in `docs/workgroup/diff-manifest.md` (the "原版没有 → 新写" table) which original file and function came closest, why it cannot cover this case, and why the copy cannot be changed instead.
+   A second store, a second UI or a second protocol for something the original group chat already has is a defect, not a feature. When a workgroup requirement looks like "the original cannot do this", first prove the original cannot: a missing cross-machine link is not a missing capability — sharing what a group has across accounts is the workgroup's whole job, not a reason to rebuild it.
 
 ## Commands
 

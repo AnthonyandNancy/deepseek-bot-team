@@ -3,7 +3,7 @@
 > 这份文件给**新会话**用。按要求只交接这两件事，其余（G6 群记忆等）不在范围内。
 > 写于 2026-10-24，仓库 `D:\code\ai\DeepSeek-Bot\BotCode`，分支 `main`，HEAD `d01f32a`。
 >
-> **2026-10-25 更新：两项均已在源码中闭环。** 当前阶段仍是 **G5 自动部分完成，未开始 G6**；
+> **2026-10-25 更新：两项均已在源码中闭环。** 当前阶段是 **G5 自动部分完成；G6 原方案已被否决，G6R 自动化已完成、人工项待做**；
 > 本轮属于 G4/G5 已交付范围的缺陷修复，没有新开阶段。剩余动作只有：应用安装副本重装并重启
 > （用户选择本轮不做，见 §2.6）、人工验收清单、G6。
 >
@@ -369,7 +369,7 @@ unreachable: true }))`）。表单能显示，但点"Sign in"必然失败。这�
 **仓库**：`D:\code\ai\DeepSeek-Bot\BotCode`，`main`，HEAD `d01f32a`。
 版本：`ds-bot` 0.2.3；`hub` package.json 写的是 0.0.0。
 
-**当前未提交改动**（用户自己的，别乱动；2026-10-25 本轮又新增了下列 2 个文件）：
+**历史记录（2026-10-25；已提交，见提交范围 `22c2767..e71119b`）**。下面这段描述的是当时的未提交改动，不再代表当前工作区；G6 工作另见 `g6/ROUND-LOG.md`。
 
 ```
 M DeepSeek-Bot-main/app/engine/package.json
@@ -423,7 +423,7 @@ M hub/src/workgroups/service.js
 
 1. **（剩余，用户机器生效）** 在 `DeepSeek-Bot-main/app/` 重装 `ds-bot` 并完全重启应用；
    验收见 §2.6。
-2. **（剩余，G6）** 群记忆 `group_memories`、重启恢复、完整验收与交付。
+2. **（剩余，G6R 人工项 G6-M1）** 群记忆跨机传输的自动化已完成：复用原版 `memory.js` 的群作用域与面板，Hub 只做 `memory.change` 传输；**不再新建 `group_memories`**。剩余是两台真机人工验收，见 `docs/workgroup/g6r/EVIDENCE-MATRIX.md`。
 3. **（剩余，人工）** 执行 `manual-checklist.md` 的门禁 1/5/6、T20 冷启动、G5 门禁 2 真机一半、
    G5-N3、G5-T14 符号链接。
 4. 不自动提交；要提交时按 AGENTS.md（英文祈使句 subject、PR 进 `dev`、分支不许

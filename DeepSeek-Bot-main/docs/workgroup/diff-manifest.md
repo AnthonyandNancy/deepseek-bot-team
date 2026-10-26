@@ -52,7 +52,8 @@ done
 | `src/host/diagnostics.js` | 报告增加 Workgroups 行；记录运行中宿主与 `client.js` 的构建时间 | 排障时能区分「运行的是旧进程」与「真有缺陷」 |
 | `src/client/index.js` | 工作群入口 effect；`workgroupOf` 与写操作分流；`roomProgress` 分流；Hub 动作；roster 索引工作群；样式 | 工作群 id 不是本地群 id，写入必须按域分发 |
 | `src/client/sources.js` | `indexRoster(value, workgroups)` + `groupRooms()` | 工作群按群组件要求的形状进 `roomsById` |
-| `src/client/sidebar.js` | 工作群行进入原版侧栏列表；群行补 `title` | 列表内混排，不新开分区 |
+| `src/client/sidebar.js` | 工作群行进入原版侧栏列表；群行补 `title`；**订阅既有 `/api/bot/feed` 的 `workgroup` 事件并刷新 `workgroupStore`** | 列表内混排，不新开分区；远端设置/成员变化要刷新原版会话头、成员卡与设置抽屉读取的那份 roster |
+| `src/workgroup/host/groups.js` | 原版群聊的完整复制；**真实 composer 的 user 行走 `mirrorLine` 上 Hub；跨机 person 行与已匹配的远端 Bot 答复以 `role: 'remote'` 只显示不开轮；普通远端 Bot 发帖保留 `post` + `member`** | 原版没有 Hub：用户行只在本地、同事看不到；匹配答复同时作为 opener 会重复开轮 |
 | `src/client/new-chat.js` | 「Create workgroup」入口与创建路径 | 复用原版建群流程，只换目的地 |
 | `src/client/details-drawer.js` | **工作群走复制件的群设置**（`room.workgroup === true` 分流，一处三元） | 工作群行的实际路径是「原版会话 → 齿轮 → 群设置」，不改这里复制件不可达。§5.2 需补入本文件 |
 | `src/client/settings.js` | 同上，设置页的 `groups` 分支也分流 | §5.2 已列本文件 |
@@ -62,7 +63,7 @@ done
 | `src/client/at-menu.js` | `@` 候选排除工作群 | 否则工作群以 id 形式出现在"其他对话"里 |
 | `src/client/settings.js` | `hub` 页、图标、渲染行 | Hub 账号页入口 |
 | `src/client/i18n.js` | 工作群/Hub 文案与「未完成」声明 | 新增界面文案必须有中文 |
-| `src/workgroup/client/panel.js` | 面板顶部「未完成」声明 | G3 水位必须显式标注 |
+| `src/workgroup/client/panel.js` | 面板顶部「未完成」声明；**导出既有 `listenLive`，供产品侧栏复用同一订阅** | G3 水位必须显式标注；一个浏览器只开一条 workgroup 推送 |
 | `client.js` | 生成物重建 | 仓库规则：不得手改 |
 
 ## 3. 未修改的原版文件（逐字节相同）
@@ -78,6 +79,27 @@ done
 | `src/host/constants.js` | `SOURCE_KIND`、`TEAM_TOOLS`、`ROUTE` 原值未动 |
 | `src/host/parts.js`、`src/host/approvals.js`、`src/host/memory.js` | 上下文分段、审批、私人记忆未动 |
 | `src/shared/mentions.js`、`src/host/text.js` | 共享解析器原样复用 |
+
+## 3.1 “原版没有 → 新写”登记
+
+任何工作群代码，若声称“原版没有这个能力，所以要新写”，必须先在本表登记，再写代码。
+没有登记的新写模块，评审直接拒绝。
+
+| 新写模块 | 原版最接近的实现 | 为什么不能复用或改复制件 | 判定 |
+|---|---|---|---|
+| `src/workgroup/host/hub.js` | 无（原版没有 Hub） | 跨用户传输在原版不存在，属真正的本域新增 | ✅ 合理 |
+| `src/workgroup/host/bridge.js` | 无（原版没有 socket 同步） | 同上 | ✅ 合理 |
+| `src/workgroup/host/memory-sync.js` | `src/host/memory.js` 的全套群记忆 | **不新写记忆引擎**：只把原版写入转成事件、把远端事件喂回原版写入路径 | ✅ 传输层新增，引擎复用 |
+| `hub/src/ws.js` 的 `memory.change` 处理器 | `hub/src/ws.js` 的 `chat.message` 处理器 | Hub 已有点对点事件流与 `events` 表；只增加一种帧类型，不新增表、解释载荷或记忆语义 | ✅ 传输层新增 |
+| `src/workgroup/host/ownership.js` 的 `rt.memoryRoomOf` | `src/host/memory.js:1476` 的 `agent/status` 过滤与 `roomIdOf` | 原版只认 `isBotSession`，工作群成员 Session 不在原版索引；新增只读接缝，不改变 `isBotSession` 或原版记忆行为 | ✅ 只读接缝 |
+
+判定口径：
+
+1. “原版没有”必须给出文件与函数级证据（哪个文件、哪个函数、为什么覆盖不了这个场景）。
+2. “不能复用”必须说明复用会破坏什么（例如原版引擎是单进程文件写，跨机需要传输层）。
+3. 传输、存储后端、协议适配可以是新写；**业务语义（谁能读写、条目长什么样、容量、回顾规则）不得新写**。
+
+---
 
 ## 4. 测试文件
 

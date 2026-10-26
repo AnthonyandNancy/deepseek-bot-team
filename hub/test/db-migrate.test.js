@@ -77,7 +77,7 @@ test('the G3 tables exist and the deliberately absent one does not', (t) => {
   assert.equal(names.includes('otp_challenges'), false, 'otp_challenges must not exist')
 })
 
-test('the G4 and G5 tables exist and the G6 one does not', (t) => {
+test('the G4 and G5 tables exist and group memory has no Hub table', (t) => {
   const { db } = withDatabase(t)
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(row => row.name)
 
@@ -91,9 +91,12 @@ test('the G4 and G5 tables exist and the G6 one does not', (t) => {
   ]) {
     assert.ok(names.includes(table), `${table} should exist`)
   }
-  // G6 (group memories) is still out of scope. A table nothing writes to would read as "already
-  // done" to whoever picks up the next phase.
-  assert.equal(names.includes('group_memories'), false, 'group_memories belongs to G6')
+  // Group memory belongs to the original engine on each machine. The Hub carries only its
+  // `memory.change` events in the existing events table; a memory table here would be the parallel
+  // store G6R removed.
+  for (const table of ['group_memories', 'group_memory_events', 'group_memories_fts']) {
+    assert.equal(names.includes(table), false, `${table} must not exist`)
+  }
 })
 
 test('a phone number and a device key are each unique where they must be', (t) => {

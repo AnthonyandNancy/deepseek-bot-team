@@ -602,6 +602,7 @@ export function createHubClient({ store, logger, fetchImpl = globalThis.fetch, n
       const token = await ensureAccess()
       return call(address(), `/v1/workgroups/${encodeURIComponent(workgroupId)}/lease`, { method: 'GET', token })
     },
+
     // Only the READ is here. Taking and releasing a lease happens over the socket
     // (`bridge.acquireLease`), because a round commits while it runs and the fence has to be checked on
     // the connection the round is already using. An HTTP acquire existed for a while and had no caller

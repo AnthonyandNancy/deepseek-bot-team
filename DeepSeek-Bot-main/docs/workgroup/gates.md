@@ -384,3 +384,83 @@ Hub 仍是唯一有序源；`src/host/` 仍是零改动。
 | `cd ds-bot && node scripts/build-client.mjs --check` | exit 0 |
 | `cd ds-bot && npm run lint` | 0 error / 13 warning（与基线相同） |
 | `git diff --name-only ... -- ds-bot/src/host` | 空 |
+
+---
+
+## G6 自动门禁（2026-10-26，`feat/g6-group-memory`）— **已被 G6R 否决**
+
+> **⚠️ 本节记录的是被否决的 G6 方案。** 它测的是自建 `group_memories` 存储、`memory-*` 端点与
+> 独立 `MemoryCard` 的行为；这些都不应存在，因为原版 `memory.js` 已有群记忆。
+> 下方“通过（自动）”只说明那套平行实现在自己的测试里自洽，**不表示 G6 门禁有效**。
+> 现行门禁见本文末尾「G6R 群记忆跨机传输」。
+
+> 历史数字保留在上文各节，不作为当前基线。G6 当时基线见本节与 `g6/EVIDENCE-MATRIX.md`。
+
+| # | 门禁 | 判定 | 结论 | 证据 |
+|---|---|---|---|---|
+| G6-1 | V1 群记忆可用且与私人/团队记忆隔离 | 可自动化 | **通过（自动）** | `hub/test/group-memory.test.js` 的 ACL/跨群/搜索用例；`ds-bot/test/workgroup-memory-isolation.test.js` 的本地视图隔离与“投影非权威” |
+| G6-2 | 断网重启不泄漏、不乱序、不误恢复 | 可自动化 | **通过（自动）** | `hub/test/group-memory.test.js` 的同库重开、离群后 404、重放幂等；`ws-events.test.js` 的 seq/重放既有证据 |
+| G6-3 | 关键安全用例（非成员、ACL、旧版本、删除审计、凭据） | 可自动化 | **通过（自动）** | `hub/test/group-memory.test.js` 的 ACL、`version-conflict`、软删除审计、`credential-like`、`source-not-in-group` |
+| G6-4 | 代码/测试/迁移/配置在两个目录内 | 结构审查 | **通过** | 改动均在 `hub/`、`ds-bot/`；无新一级目录/运行时依赖；迁移 v8 使用 `node:sqlite` FTS5 |
+| G6-5 | 最终验收报告 | 文档 | **本文件 + `g6/EVIDENCE-MATRIX.md`** | 人工项标 BLOCKED，未自评 PASS |
+| G6-M1 | 两台真机读同一群记忆，离群后不可读 | 只能人工 | **BLOCKED** | 步骤见 `manual-checklist.md` G6-M1 |
+
+### G6 当前命令结果
+
+| 命令 | 结果 |
+|---|---|
+| `cd hub && npm test` | **283 tests / 283 pass / 0 fail** |
+| `cd ds-bot && npm test` | **1225 tests / 1224 pass / 1 skip / 0 fail / exit 0** |
+| `cd ds-bot && node scripts/build-client.mjs --check` | exit 0 |
+| `cd ds-bot && npm run lint` | 0 error / 13 warning |
+| `git diff --name-only e71119b -- ds-bot/src/host` | 仅 `memory.js`（允许的回顾接缝）；冻结五文件为空 |
+
+### G6 证据细节
+
+| 断言 | 文件 |
+|---|---|
+| `group_memories` / `group_memory_events` / FTS trigram / 三触发器 / 群删除级联 | `hub/test/db-g6-schema.test.js` |
+| 成员检查先于记忆读取；ACL 显式名单；创建者自动入 ACL；ACL 只能是活跃成员 | `hub/test/group-memory.test.js` |
+| 旧版本修正 409 且不覆盖；删除软删、FTS 移出、审计保留 | 同上 |
+| 重放同一创建幂等（200 + `duplicate: true`，行数 1） | 同上 |
+| 同一 DB 文件重开后可检索；离群后 list/search 404 | 同上 |
+| `memory.*` 四类型在封闭集、未读只认 `chat.message`；事件走既有 seq | `hub/test/ws-events.test.js`、`hub/test/group-memory.test.js` |
+| 两 Runtime 创建/修正/删除经 WSS 传播并重读投影 | `ds-bot/test-realtime/workgroup-memory.test.js` |
+| 五个 `apiHandle` 端点、缺版本拒绝、写后重读 | `ds-bot/test-realtime/workgroup-memory.test.js` |
+| 成员 Session 回顾接缝；relay 不回顾；`isBotSession` 语义不变 | `ds-bot/test/workgroup-memory-review.test.js` |
+| 删除工作群归档本地记忆 | 同上 |
+| 设置表单五个动作走 `callWorkgroup`，写后重读，feed 触发重读 | `ds-bot/test/workgroup-ux.test.js` |
+| 本地私人/团队记忆与群记忆视图隔离；投影持久化但不作权威 | `ds-bot/test/workgroup-memory-isolation.test.js` |
+
+> 1 skip 是既有 Windows 临时目录用例，与 G6 无关。人工项保持 BLOCKED。
+
+---
+
+## G6R 群记忆跨机传输（2026-10-24）
+
+- 状态：**未开工**。本节在实施完成后才填写自动化证据；现在只登记口径，不写 PASS。
+- 现行计划：`docs/superpowers/plans/2026-10-24-g6r-copy-first-group-memory.md`
+- 设计：`g6r/DESIGN-COPY-FIRST.md`
+- 被否决的旧方案：`feat/g6-group-memory` 分支与 `docs/superpowers/plans/2026-10-26-g6-group-memory.md`
+
+### 为什么重做
+
+旧 G6 把“原版群记忆没有跨机传输”误判成“原版没有群记忆”，新建了 `group_memories` 表、
+`memory-*` 端点和独立 `MemoryCard`。原版 `memory.js` 本身已有群作用域、成员校验、容量、回顾、
+面板与归档；工作群缺的只是跨机传输。详见 `parity-audit.md` §1 与 `g6r/DESIGN-COPY-FIRST.md` §2。
+
+### G6R 门禁（待实施）
+
+| # | 门禁 | 判定方式 | 当前结论 |
+|---|---|---|---|
+| G6R-1 | 原版记忆引擎零行为变化 | `memory.test.js` 既有断言未改且全绿 | **未开工** |
+| G6R-2 | 工作群成员 Session 能读群记忆段并被回顾 | `workgroup-memory-room.test.js` | **未开工** |
+| G6R-3 | 群写入上报、私聊/团队/本地群不上报 | `workgroup-memory-sync.test.js` | **未开工** |
+| G6R-4 | 远端变更走原版写入路径且幂等 | `workgroup-memory-sync.test.js` | **未开工** |
+| G6R-5 | `memory.change` 扇出且不计未读 | `hub/test/ws-events.test.js` | **未开工** |
+| G6R-6 | ack 不把记忆变更加工成聊天行 | `ds-bot/test/workgroup-bridge.test.js` | **未开工** |
+| G6R-7 | 删除工作群归档原版记忆 | `workgroup-memory-sync.test.js` | **未开工** |
+| G6R-8 | 两机真实传播、离群失效 | `test-realtime/workgroup-memory-sync.test.js` | **未开工** |
+| G6-M1 | 两台真机、两个账号 | 只能人工 | **BLOCKED** |
+
+> 本节不得在实施前填写“通过”。G6-M1 与 G4/G5 人工项一样，只有维护者能写 PASS。

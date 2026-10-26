@@ -148,7 +148,7 @@ git diff --stat ds-bot/src/host/
 | 项 | 说明 | 出处 |
 |---|---|---|
 | `run-stats` / `chat` 端点 | 原版按 Bot id 解析，群是 DSH 会话，从不用 | `parity-audit.md` §5 |
-| 群记忆跨用户检索 | 原版没有，属 G6 | `progress-and-gaps.md` 缺口 11 |
+| 群记忆跨机传输 | 原版有群记忆引擎，没有跨机传输；属 G6R | `parity-audit.md` §1、§5 |
 | `stopRoomTurn` 不适用 | 读原版 `live`，工作群有自己的停止路径 | 本文 §3 |
 | 人员显示名 | Hub `users` 无 `display_name` | `gates.md`「仍存在的限制」 |
 

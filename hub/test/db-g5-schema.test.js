@@ -78,26 +78,23 @@ const catchError = (fn) => {
   return undefined
 }
 
-test('migration 7 is the newest, so a Hub from G5 upgrades rather than refusing to start', () => {
-  // Migration 5 added the shared reply mode and a Bot's published appearance.
-  // Migration 6 adds the group's shared permission preset and DROPS `memberships.bot_role`.
-  // Migration 7 adds `workgroups.lead_membership_id`: which member leads the group, decided once by
-  // the owner's machine instead of derived per machine.
-  //
-  // Both are in-place: v5 is additive (`ADD COLUMN` with a default), and v6's `DROP COLUMN` is
-  // supported by the SQLite this Hub ships with. A G5 Hub therefore starts and upgrades rather than
-  // refusing, which is what this asserts.
+test('a G5 database upgrades to the latest schema rather than refusing to start', () => {
+  // Migrations 5 and 6 are the G4 repairs; v7 added `workgroups.lead_membership_id`. G6R adds no
+  // migration at all: group memory stays in the original engine on each machine.
   assert.equal(LATEST_VERSION, 7)
 })
 
-test('the four G5 tables exist and nothing from G6 arrived early', (t) => {
+test('the four G5 tables exist and group memory has no Hub table', (t) => {
   const { db } = withDatabase(t)
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name)
   for (const table of ['tasks', 'approvals', 'round_leases', 'artifacts']) {
     assert.ok(names.includes(table), `${table} must exist after migration 4`)
   }
-  // Same rule as the absent `otp_challenges` and `group_memories`: an empty table reads as "done".
-  assert.equal(names.includes('group_memories'), false, 'group_memories is G6')
+  // G6R reuses the original group-memory engine; the Hub only stores `memory.change` in the
+  // existing events table. Keeping these names absent makes a future parallel store fail loudly.
+  for (const table of ['group_memories', 'group_memory_events', 'group_memories_fts']) {
+    assert.equal(names.includes(table), false, `${table} must not exist`)
+  }
 })
 
 test('a task id is the primary key, so a redelivered request cannot become a second task', (t) => {

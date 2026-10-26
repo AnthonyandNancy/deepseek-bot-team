@@ -101,9 +101,9 @@ export const MIGRATIONS = [
     // makes "at least once delivery, deduplicated on receipt" true rather than aspirational.
     //
     // Only the seven tables section 12 assigns to G4, plus the attachment relay the acceptance
-    // matrix (T08) requires. `round_leases`, `tasks`, `approvals`, `artifacts` and
-    // `group_memories` are G5/G6 and are deliberately absent — same reasoning as the absent
-    // `otp_challenges` in migration 1: an empty table reads as "already done".
+    // matrix (T08) requires. `round_leases`, `tasks`, `approvals` and `artifacts` are G5 and are
+    // deliberately absent — same reasoning as the absent `otp_challenges` in migration 1: an empty
+    // table reads as "already done".
     //
     // `attachments` is not section 12's `artifacts`: artifacts hang off a task and carry a
     // sharing ACL that only the approval flow can produce. A group attachment is an ordinary
@@ -272,7 +272,7 @@ export const MIGRATIONS = [
   {
     // G5: cross-user delegation. The four tables section 12 assigns to this phase — the task, the
     // approval B grants on their own device, the single-coordinator lease, and the authorized
-    // artifact. `group_memories` stays absent: that is G6, and an empty table reads as "done".
+    // artifact.
     //
     // `tasks.id` is the *requester's* taskId, minted by A's Bridge and carried in the
     // `task.request` envelope. Making it the primary key is what makes gate 5 structural: a task

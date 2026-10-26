@@ -29,8 +29,8 @@ export const MEMBER_ROLES = new Set(['owner', 'admin', 'member'])
 // replay path `deliveries` + `ack_at` + cursor already gives a message, and a timeline has to show
 // "asked → approved → running → done" interleaved with the chat around it.
 //
-// `memory.*` stays absent: group memory is G6, and a type nothing writes would be stored and
-// replayed forever to a client that cannot act on it.
+// G6R adds one group-memory type. It rides the same seq and replay path as a message, but only
+// `chat.message` is readable: a memory change must never raise the unread badge.
 export const EVENT_TYPES = new Set([
   'chat.message',
   'chat.edited',
@@ -53,6 +53,10 @@ export const EVENT_TYPES = new Set([
   // ── artifacts (§9.3) ───────────────────────────────────
   'artifact.available',
   'artifact.revoked',
+  // ── group memory (G6R) ──────────────────────────────────
+  // One change the ORIGINAL memory engine already made on the machine that made it.
+  // The Hub stores and orders it; it never interprets the entry, its format or who may write.
+  'memory.change',
 ])
 
 // The one event type a person is reading. Unread is a count of THESE, never a difference of `seq`:

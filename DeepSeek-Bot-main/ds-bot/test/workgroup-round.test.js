@@ -14,7 +14,7 @@ import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 
-function start() {
+export function startRoundFixture() {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-wg-round-'))
   const ctx = fakeContext()
   const workspaces = new Map()
@@ -121,6 +121,20 @@ const twoMembers = () => ([
   { id: 'bot-b', kind: 'localBot', name: 'Editor' },
 ])
 
+// Wait until the round has actually made a member's Session. A fixed sleep is not a
+// synchronization primitive: under the full parallel suite the Session can exist before its
+// waiter, and an answer delivered in that window is lost, which then waits out the 240 s reply
+// timeout. Timer polling (not setImmediate) lets the round's own continuations run.
+const waitForSession = async (wg, room, memberId, deadlineMs = 20_000) => {
+  const deadline = Date.now() + deadlineMs
+  while (Date.now() < deadline) {
+    const found = wg.workgroupOf(room.id).sessions?.[memberId]
+    if (found !== undefined) return found
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  return undefined
+}
+
 // The team's Bots as the host actually stores them. A member Session renders its Bot's
 // identity from `state.bots`, so a test about identity needs the Bots to exist — in the
 // real app they always do.
@@ -139,7 +153,7 @@ async function ownRelaySession(wg) {
 }
 
 test('a workgroup round runs, posts each answer and records who passed', async (t) => {
-  const { wg, answer, beginRound, stop, untilWaiter } = start()
+  const { wg, answer, beginRound, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   // The admin (first member) answers; the second passes.
@@ -156,7 +170,7 @@ test('a workgroup round runs, posts each answer and records who passed', async (
 })
 
 test('a finished round leaves no recovery record, and a stopped one does', async (t) => {
-  const { wg, answer, beginRound, stop, untilWaiter } = start()
+  const { wg, answer, beginRound, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const live = []
@@ -172,12 +186,11 @@ test('a finished round leaves no recovery record, and a stopped one does', async
 })
 
 test('a round names only the member an @mention calls', async (t) => {
-  const { wg, answer, beginRound, stop } = start()
+  const { wg, answer, beginRound, stop } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '@Editor 你看看')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const editorSession = wg.workgroupOf(room.id).sessions['bot-b']
+  const editorSession = await waitForSession(wg, room, 'bot-b')
   assert.ok(editorSession !== undefined, 'the mentioned member was called')
   assert.equal(wg.workgroupOf(room.id).sessions['bot-a'], undefined, 'the unmentioned admin was not called')
   await answer(editorSession, '看过了，没问题')
@@ -186,19 +199,19 @@ test('a round names only the member an @mention calls', async (t) => {
 })
 
 test('@all calls every member, one at a time', async (t) => {
-  const { wg, answer, beginRound, stop } = start()
+  const { wg, answer, beginRound, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '@all 大家好')
   // A round is serial by design (the original's rule: one member speaks at a time), so
-  // the second member is only called after the first has answered.
-  await new Promise(resolve => setTimeout(resolve, 40))
-  const first = wg.workgroupOf(room.id).sessions['bot-a']
-  assert.ok(first !== undefined, 'the admin was called first')
+  // the second member is only called after the first has answered. Wait for the FIRST WAITER,
+  // not just its Session: under parallel load the Session can exist before the answer listener
+  // is registered, and an answer delivered in that window is lost.
+  const first = await untilWaiter('bot-a')
+  assert.ok(wg.workgroupOf(room.id).sessions['bot-a'] !== undefined, 'the admin was called first')
   assert.equal(wg.workgroupOf(room.id).sessions['bot-b'], undefined, 'the others wait their turn')
   await answer(first, '收到')
-  await new Promise(resolve => setTimeout(resolve, 40))
-  const second = wg.workgroupOf(room.id).sessions['bot-b']
+  const second = await untilWaiter('bot-b')
   assert.ok(second !== undefined, 'then the other member is called')
   await answer(second, '也收到')
   const result = JSON.parse(await running)
@@ -206,7 +219,7 @@ test('@all calls every member, one at a time', async (t) => {
 })
 
 test('a [PASS] reply stays out of the room log', async (t) => {
-  const { wg, answer, beginRound, stop, untilWaiter } = start()
+  const { wg, answer, beginRound, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '闲聊')
@@ -221,7 +234,7 @@ test('a [PASS] reply stays out of the room log', async (t) => {
 })
 
 test('stopping a round cancels the member turn and drops its late reply', async (t) => {
-  const { wg, answer, beginRound, cancelled, stop, untilWaiter } = start()
+  const { wg, answer, beginRound, cancelled, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '做点慢活')
@@ -240,14 +253,14 @@ test('stopping a round cancels the member turn and drops its late reply', async 
 })
 
 test('stopping a round that is not running is a no-op, not an error', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   assert.equal(await wg.stopRound(room.id), false)
 })
 
 test('names are labels: a custom name may repeat, and an empty name restores the automatic one', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   const first = await wg.createWorkgroup({ name: '原名', members: twoMembers() })
   await wg.createWorkgroup({ name: '另一个', members: twoMembers() })
@@ -267,7 +280,7 @@ test('names are labels: a custom name may repeat, and an empty name restores the
 })
 
 test('only the user or the admin may change a workgroup', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: '权限', members: twoMembers() })
   assert.equal(wg.workgroupOf(room.id).adminId, 'bot-a')
@@ -277,7 +290,7 @@ test('only the user or the admin may change a workgroup', async (t) => {
 })
 
 test('removing a member releases and archives its Session', async (t) => {
-  const { wg, archived, stop } = start()
+  const { wg, archived, stop } = startRoundFixture()
   t.after(stop)
   // Three members, so one may legally leave: a group may never drop below two (the
   // original's `checkMembers`, which this domain now enforces as well).
@@ -293,7 +306,7 @@ test('removing a member releases and archives its Session', async (t) => {
 })
 
 test('deleting a workgroup clears its map entries and releases every Session', async (t) => {
-  const { wg, archived, stop } = start()
+  const { wg, archived, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: '待删除', members: twoMembers() })
   const { id: sessionId } = await wg.sessionFor(wg.workgroupOf(room.id), wg.workgroupOf(room.id).members[0])
@@ -305,7 +318,7 @@ test('deleting a workgroup clears its map entries and releases every Session', a
 })
 
 test('resume reports interrupted work but never replays a round', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: '恢复', members: twoMembers() })
   await wg.sessionFor(wg.workgroupOf(room.id), wg.workgroupOf(room.id).members[0])
@@ -317,7 +330,7 @@ test('resume reports interrupted work but never replays a round', async (t) => {
 })
 
 test('the relay tool refuses a Session this domain does not own', async (t) => {
-  const { ctx, wg, stop } = start()
+  const { ctx, wg, stop } = startRoundFixture()
   t.after(stop)
   await wg.createWorkgroup({ name: '越权', members: twoMembers() })
   // 'relay-session' was never registered as owned.
@@ -326,7 +339,7 @@ test('the relay tool refuses a Session this domain does not own', async (t) => {
 })
 
 test('the read tool refuses a Session this domain does not own', async (t) => {
-  const { ctx, wg, stop } = start()
+  const { ctx, wg, stop } = startRoundFixture()
   t.after(stop)
   await wg.createWorkgroup({ name: '越权读', members: twoMembers() })
   const out = await ctx.registeredTools.get('read_workgroup_chat').execute({ group: '越权读' }, { agent: { id: 'stranger' } })
@@ -337,7 +350,7 @@ test('the read tool refuses a Session this domain does not own', async (t) => {
 // there is no relay Session, so a posted message would queue forever and the panel would
 // look frozen. The route refuses instead, and says why.
 test('sending into a workgroup with no members is refused, not silently queued', async (t) => {
-  const { wg, rpc, stop } = start()
+  const { wg, rpc, stop } = startRoundFixture()
   t.after(stop)
   // A workgroup can no longer be CREATED empty — it needs two members, like a local group
   // (the original's `checkMembers`). The send guard still matters, because a record can
@@ -355,7 +368,7 @@ test('sending into a workgroup with no members is refused, not silently queued',
 })
 
 test('sending into a workgroup prompts its own Session, the way a group chat does', async (t) => {
-  const { wg, rpc, stop, followups } = start()
+  const { wg, rpc, stop, followups } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const result = await rpc('send', { roomId: room.id, text: '开始吧' })
@@ -374,7 +387,7 @@ test('sending into a workgroup prompts its own Session, the way a group chat doe
 // its automatic name is derived from the members, so two groups over the same Bots share
 // it by design, and only a CUSTOM name is checked for a clash.
 test('the same Bots can make several workgroups: the automatic name may repeat', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   const a = await wg.createWorkgroup({ members: twoMembers() })
   const b = await wg.createWorkgroup({ members: twoMembers() })
@@ -390,7 +403,7 @@ test('the same Bots can make several workgroups: the automatic name may repeat',
 })
 
 test('members are de-duplicated, as the original composer does', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   // The picker can hand the same Bot twice; a Bot is an identity, not an occurrence.
   const room = await wg.createWorkgroup({ members: [...twoMembers(), ...twoMembers()] })
@@ -399,7 +412,7 @@ test('members are de-duplicated, as the original composer does', async (t) => {
 })
 
 test('two workgroups may share a custom name: the id is what identifies them', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   const a = await wg.createWorkgroup({ name: '财务月报', members: twoMembers() })
   const b = await wg.createWorkgroup({ name: '财务月报', members: twoMembers() })
@@ -413,7 +426,7 @@ test('two workgroups may share a custom name: the id is what identifies them', a
 // rows reading the same, a change is not safely attributable to one of them. Give this
 // one its own name first, then change the admin.
 test('a group whose name is shared with another cannot have its admin changed', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   // Same members => the same automatic name, which is exactly the ambiguous case. The
   // automatic name carries a SECOND-granularity stamp (`stamp` in groups.js), so two
@@ -439,7 +452,7 @@ test('a group whose name is shared with another cannot have its admin changed', 
 })
 
 test('a uniquely-named group may change its admin without renaming', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   // One workgroup with this member set, so its automatic name is unique: nothing ambiguous.
   const room = await wg.createWorkgroup({ members: twoMembers() })
@@ -453,7 +466,7 @@ test('a uniquely-named group may change its admin without renaming', async (t) =
 // Session (`buildRoom`: `const id = await createSession(title)`). The workgroup had only
 // per-member Sessions and a synthetic `wg-<uuid>` id, so there was nothing to open.
 test('a workgroup is a Session, exactly as an original group is', async (t) => {
-  const { wg, rt, stop } = start()
+  const { wg, rt, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ members: twoMembers() })
   // Its id is a real Session id from the runtime, not a made-up string.
@@ -466,7 +479,7 @@ test('a workgroup is a Session, exactly as an original group is', async (t) => {
 })
 
 test('opening a workgroup is the original openSession(room.id)', async (t) => {
-  const { wg, stop } = start()
+  const { wg, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ members: twoMembers() })
   // The client action resolves the room id and hands it to openSession — the same call
@@ -479,7 +492,7 @@ test('opening a workgroup is the original openSession(room.id)', async (t) => {
 // no Session, so they could not be opened. Reading the list upgrades them in place rather
 // than leaving dead rows the user cannot enter.
 test('a legacy workgroup gets a Session the first time the list is read', async (t) => {
-  const { wg, rt, rpc, stop } = start()
+  const { wg, rt, rpc, stop } = startRoundFixture()
   t.after(stop)
   // Plant a legacy record the way the old code wrote it.
   await wg.load()
@@ -503,7 +516,7 @@ test('a legacy workgroup gets a Session the first time the list is read', async 
 // The three pieces below are copied from the original group chat; each was missing, and
 // together they are what "进入工作群聊" means.
 test('the group\'s own Session is told to relay, as an original group Session is', async (t) => {
-  const { ctx, wg, stop } = start()
+  const { ctx, wg, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'RelayPrompt', members: twoMembers() })
   const section = ctx.sections.get('workgroup-relay')
@@ -524,12 +537,13 @@ test('the group\'s own Session is told to relay, as an original group Session is
 })
 
 test('a round\'s answers reach the client the original way: through the relay result', async (t) => {
-  const { wg, answer, beginRound, stop } = start()
+  const { wg, answer, beginRound, stop } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '说说你的看法')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  await answer(wg.workgroupOf(room.id).sessions['bot-a'], '我建议先做隔离')
+  const adminSession = await waitForSession(wg, room, 'bot-a')
+  assert.ok(adminSession !== undefined, 'the admin was called')
+  await answer(adminSession, '我建议先做隔离')
   const result = JSON.parse(await running)
 
   // The ORIGINAL does not post in-round replies into the group's Session: `group_relay`
@@ -544,7 +558,7 @@ test('a round\'s answers reach the client the original way: through the relay re
 })
 
 test('what the user types into a workgroup is queued for the next round', async (t) => {
-  const { ctx, wg, stop } = start()
+  const { ctx, wg, stop } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   // The original's turns.js listener does this for a local group: a user message in the
@@ -571,7 +585,7 @@ test('what the user types into a workgroup is queued for the next round', async 
 // it as the model's answer. Relying on a system prompt instead left the group silent
 // whenever the model chose to answer in its own voice — the reported "进不去".
 test('the group Session relays by itself, without asking the model', async (t) => {
-  const { ctx, wg, stop } = start()
+  const { ctx, wg, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'RelayStream', members: twoMembers() })
   const hook = ctx.listeners.get('llm/stream').find(listener => listener.relay === 'workgroup_relay')
@@ -607,7 +621,7 @@ test('the group Session relays by itself, without asking the model', async (t) =
 // does. Without this the chat is a blank page and there is nothing to relay — greetRoom
 // in the original.
 test('a new workgroup posts a kickoff, so its chat is never a blank page', async (t) => {
-  const { wg, stop, followups } = start()
+  const { wg, stop, followups } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'Greeted', members: twoMembers() })
   // The kickoff is delivered asynchronously, on purpose: creating the group must not wait
@@ -622,15 +636,14 @@ test('a new workgroup posts a kickoff, so its chat is never a blank page', async
 // Stopping ONE member: the original's stopMemberWork. The round keeps going for the
 // others; only the stopped member's reply is dropped.
 test('one member can be stopped while the round goes on', async (t) => {
-  const { wg, rpc, beginRound, stop, answer } = start()
+  const { wg, rpc, beginRound, stop, answer } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   // No @all: the admin answers alone, so the round has exactly one member to stop. With
   // two, the second would legitimately keep waiting and the test would hang on its own
   // setup rather than on the behaviour under test.
   const running = beginRound(room, '说说你的看法')
-  await new Promise(resolve => setTimeout(resolve, 40))
-  const adminSession = wg.workgroupOf(room.id).sessions['bot-a']
+  const adminSession = await waitForSession(wg, room, 'bot-a')
   assert.ok(adminSession !== undefined, 'the admin started working')
 
   assert.equal(await rpc('stop-member-work', { roomId: room.id, botId: 'bot-a' })
@@ -659,7 +672,7 @@ test('one member can be stopped while the round goes on', async (t) => {
 // The original renders a member's group Session with that MEMBER's own prompt and tools
 // (`room.sessions[botId]`), and only the group's own Session is the relay.
 test('a member Session carries its Bot identity, and only the group Session is the relay', async (t) => {
-  const { ctx, wg, rt, stop } = start()
+  const { ctx, wg, rt, stop } = startRoundFixture()
   t.after(stop)
   plantBots(rt)
   const room = await wg.createWorkgroup({ name: 'Identity', members: twoMembers() })
@@ -689,7 +702,7 @@ test('a member Session carries its Bot identity, and only the group Session is t
 //    original's kickoff prompt. Before this, the kickoff was relayed as an empty user
 //    message, and the admin was asked to answer "User: " with nothing after it.
 test('the kickoff opens a round with the admin and the original kickoff prompt', async (t) => {
-  const { ctx, wg, followups, stop } = start()
+  const { ctx, wg, followups, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'Kickoff', members: twoMembers() })
   await new Promise(resolve => setTimeout(resolve, 40))
@@ -707,8 +720,7 @@ test('the kickoff opens a round with the admin and the original kickoff prompt',
   const relay = ctx.registeredTools.get('workgroup_relay')
   wg.registerSessionOwner('relay-kickoff', { kind: 'workgroup', workgroupId: room.id })
   const running = relay.execute({}, { agent: { id: 'relay-kickoff' }, callId: 'c-kick', signal: new AbortController().signal })
-  await new Promise(resolve => setTimeout(resolve, 40))
-  const adminSession = wg.workgroupOf(room.id).sessions['bot-a']
+  const adminSession = await waitForSession(wg, room, 'bot-a')
   assert.ok(adminSession !== undefined, 'the admin was called for the opening turn')
   const prompt = followups.findLast(entry => entry.sessionId === adminSession)?.message.content[0].text ?? ''
   assert.match(prompt, /created this group and has not written yet/, 'the original kickoff text is used')
@@ -724,12 +736,11 @@ test('the kickoff opens a round with the admin and the original kickoff prompt',
 
 // 2. "@bot 没回复": an @mention names the member, and only it.
 test('an @mention in the first message calls that member and it answers', async (t) => {
-  const { wg, answer, beginRound, stop } = start()
+  const { wg, answer, beginRound, stop } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '@Editor 请检查一下')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const editorSession = wg.workgroupOf(room.id).sessions['bot-b']
+  const editorSession = await waitForSession(wg, room, 'bot-b')
   assert.ok(editorSession !== undefined, 'the mentioned member speaks')
   // The member is told it is in a group, and what "@Name" does there.
   await answer(editorSession, '检查完了')
@@ -741,12 +752,12 @@ test('an @mention in the first message calls that member and it answers', async 
 // 3. "对话没回复": what a member says before its last step is posted while it works, so the
 //    group chat shows progress instead of going quiet until the turn ends.
 test('a member at work posts what it says before its final answer', async (t) => {
-  const { ctx, wg, beginRound, stop } = start()
+  const { ctx, wg, beginRound, stop } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '查一下')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const session = wg.workgroupOf(room.id).sessions['bot-a']
+  const session = await waitForSession(wg, room, 'bot-a')
+  assert.ok(session !== undefined, 'the member session exists')
   const emit = async event => { for (const listener of ctx.listeners.get('session/event') ?? []) await listener({ id: session }, event) }
   await emit({ type: 'turn/start', data: { turn: 1 } })
   // A text WITH a tool call goes on at once: the member is still working.
@@ -765,7 +776,7 @@ test('a member at work posts what it says before its final answer', async (t) =>
 // A failed model call is not a pass (the original's rule): the round says why the member
 // is silent and goes on, so "no reply" is never silently reported as "[PASS]".
 test('a failed member turn is reported as a failure, not a pass', async (t) => {
-  const { ctx, wg, beginRound, stop } = start()
+  const { ctx, wg, beginRound, stop } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const running = beginRound(room, '帮我看一下')
@@ -790,7 +801,7 @@ test('a failed member turn is reported as a failure, not a pass', async (t) => {
 // The previous test used `'bot-a'` (a Bot id), which is not a Session id and therefore
 // never exercised this path. This one uses the real member Session.
 test('a member Session reaches the model, and only the group Session relays', async (t) => {
-  const { ctx, wg, answer, beginRound, stop } = start()
+  const { ctx, wg, answer, beginRound, stop } = startRoundFixture()
   t.after(stop)
   const room = await ownRelaySession(wg)
   const hook = ctx.listeners.get('llm/stream').find(listener => listener.relay === 'workgroup_relay')
@@ -799,8 +810,7 @@ test('a member Session reaches the model, and only the group Session relays', as
 
   // Run a round far enough that the admin's own member Session exists.
   const running = beginRound(room, '说说看')
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const memberSession = wg.workgroupOf(room.id).sessions['bot-a']
+  const memberSession = await waitForSession(wg, room, 'bot-a')
   assert.ok(memberSession !== undefined, 'the member got its own Session')
 
   // The member's Session must reach the model. Before the fix it was relayed instead,
@@ -825,7 +835,7 @@ test('a member Session reaches the model, and only the group Session relays', as
 // that the group sees it looked. The copy registered only two of the original's three
 // group tools, so the prompt promised a tool that did not exist.
 test('a workgroup member can read its own chat, and the group sees it looked', async (t) => {
-  const { ctx, rt, wg, answer, beginRound, stop } = start()
+  const { ctx, rt, wg, answer, beginRound, stop } = startRoundFixture()
   t.after(stop)
   plantBots(rt)
   const room = await ownRelaySession(wg)
@@ -833,8 +843,7 @@ test('a workgroup member can read its own chat, and the group sees it looked', a
   // A round nobody answers waits for the reply timeout, so an assertion that fires early
   // must not leave it pending: stop the round however this test ends.
   t.after(() => wg.stopRound(room.id))
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const sessionId = wg.workgroupOf(room.id).sessions['bot-a']
+  const sessionId = await waitForSession(wg, room, 'bot-a')
   assert.ok(sessionId !== undefined)
 
   const tool = ctx.registeredTools.get('workgroup_read_own_chat')
@@ -856,7 +865,7 @@ test('a workgroup member can read its own chat, and the group sees it looked', a
 })
 
 test('a session that is not in a workgroup cannot use read_own_chat', async (t) => {
-  const { ctx, stop } = start()
+  const { ctx, stop } = startRoundFixture()
   t.after(stop)
   const tool = ctx.registeredTools.get('workgroup_read_own_chat')
   const said = await tool.execute({}, { agent: { id: 'someone-else' } })
@@ -869,7 +878,7 @@ test('a session that is not in a workgroup cannot use read_own_chat', async (t) 
 // so such a message opened a second round instead and the group looked like it had stopped
 // answering.
 test('a message typed during the last speaker stays in the same round', async (t) => {
-  const { ctx, wg, answer, beginRound, stop } = start()
+  const { ctx, wg, answer, beginRound, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   // Two members (a group may not have one, the original's `checkMembers`), with Writer
   // named by @mention so it is the ONLY speaker — which is the state this test needs: the
@@ -878,8 +887,7 @@ test('a message typed during the last speaker stays in the same round', async (t
   wg.registerSessionOwner('relay-session', { kind: 'workgroup', workgroupId: room.id })
   const running = beginRound(room, '@Writer 开始')
   t.after(() => wg.stopRound(room.id))
-  await new Promise(resolve => setTimeout(resolve, 30))
-  const sessionId = wg.workgroupOf(room.id).sessions['bot-a']
+  const sessionId = await waitForSession(wg, room, 'bot-a')
   assert.ok(sessionId !== undefined)
 
   // The user types while that speaker is still answering. This is the real path: the
@@ -891,9 +899,9 @@ test('a message typed during the last speaker stays in the same round', async (t
 
   await answer(sessionId, '第一句')
   // The round then calls the member again for the message the user typed, inside the same
-  // round. Answer that second turn too, or the round waits for the reply timeout.
-  await new Promise(resolve => setTimeout(resolve, 30))
-  await answer(sessionId, '答你那句')
+  // round. Wait for that second waiter, or the answer is lost and the round waits out its timeout.
+  const secondSession = await untilWaiter('bot-a')
+  await answer(secondSession, '答你那句')
   const result = JSON.parse(await running)
   assert.ok(result.replies.some(reply => reply.kind === 'user' && reply.text === '顺便问一句'),
     'the message the user typed mid-round is part of this round, not a second one')
@@ -905,7 +913,7 @@ test('a message typed during the last speaker stays in the same round', async (t
 // message when the round ends, and the work chain it was handed on is closed. The copy
 // dropped the whole block, so a poster never heard anything back.
 test('a round posted with report_back reports back to the Bot that posted it', async (t) => {
-  const { ctx, wg, answer, followups, stop } = start()
+  const { ctx, wg, answer, followups, stop, untilWaiter } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'ReportBack', members: twoMembers() })
   wg.registerSessionOwner('relay-session', { kind: 'workgroup', workgroupId: room.id })
@@ -913,13 +921,13 @@ test('a round posted with report_back reports back to the Bot that posted it', a
   const running = ctx.registeredTools.get('workgroup_relay')
     .execute({}, { agent: { id: 'relay-session' }, callId: 'call-rb', signal: new AbortController().signal })
   t.after(() => wg.stopRound(room.id))
-  await new Promise(resolve => setTimeout(resolve, 30))
 
-  // Writer posted it, so Writer never answers its own post; Editor does.
-  const editorSession = wg.workgroupOf(room.id).sessions['bot-b']
+  // Writer posted it, so Writer never answers its own post; Editor does. Wait for the actual
+  // waiter, not a fixed sleep: the Session exists before `roomWaiters.set`, and an answer in that
+  // window is lost (the whole round then waits out the 240 s reply timeout).
+  const editorSession = await untilWaiter('bot-b')
   assert.ok(editorSession !== undefined, 'the other member was called')
   await answer(editorSession, '做完了')
-  await new Promise(resolve => setTimeout(resolve, 40))
   await running
 
   // The report reached the poster's OWN chat, not the workgroup's Session.
@@ -935,7 +943,7 @@ test('a round posted with report_back reports back to the Bot that posted it', a
 // knows only local Bots and rooms and answered "Unknown conversation" for a workgroup.
 // This domain keeps those flags on its own record, so its own route must take them.
 test('pin and hide are recorded on the workgroup through its own route', async (t) => {
-  const { wg, rpc, stop } = start()
+  const { wg, rpc, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'Ops', members: twoMembers() })
   const pinned = await rpc('set-flags', { id: room.id, pinned: true })
@@ -956,7 +964,7 @@ test('pin and hide are recorded on the workgroup through its own route', async (
 })
 
 test('a workgroup opens the original group memory panel instead of "Unknown group chat"', async (t) => {
-  const { wg, rt, stop } = start()
+  const { wg, rt, stop } = startRoundFixture()
   t.after(stop)
   const room = await wg.createWorkgroup({ name: 'MemoryProbe', members: twoMembers() })
   // The panel the sidebar opens asks the original memory module by room id. A workgroup

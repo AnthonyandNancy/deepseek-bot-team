@@ -538,6 +538,95 @@ test('a message typed into a Hub group starts a round the Bots answer', async (t
     'the addressee must be given a turn: no round means no Bot ever answers')
 })
 
+// 7a. THE REAL COMPOSER'S LINE MUST REACH THE HUB.
+//
+// The shell composer prompts the group's own Session; it does not call the plugin's
+// `actions.send`. The relay appends that user line to the local log, and until now nothing
+// mirrored it. A colleague therefore had nothing to pull: the sender saw the message, the Hub
+// did not.
+test('a line typed through the real group Session reaches the Hub and the colleague', async (t) => {
+  const { alice, bob, workgroupId } = await invitedPair(t)
+  const room = alice.wg.roomOfHubGroup(workgroupId)
+  const bobRoom = () => bob.wg.roomOfHubGroup(workgroupId)
+  const text = '这条应该到同事那边'
+  await alice.wg.postToSession(room, text)
+  const emit = async (sessionId, event) => {
+    for (const listener of alice.rt.ctx.listeners.get('session/event') ?? []) await listener({ id: sessionId }, event)
+  }
+  await emit(room.id, {
+    type: 'user/message',
+    data: { source: { kind: 'user' }, content: [{ type: 'text', text }] },
+  })
+  const relay = alice.rt.ctx.registeredTools.get('workgroup_relay').execute(
+    {}, { agent: { id: room.id }, callId: 'call-real-composer', signal: new AbortController().signal },
+  )
+  await until(() => (bobRoom()?.log ?? []).some(line => line.text === text), {
+    label: 'the colleague to receive the real composer line',
+  })
+  assert.equal((alice.wg.workgroupOf(room.id).log ?? []).filter(line => line.text === text).length, 1,
+    'the sender logs the line once')
+  assert.equal((bobRoom()?.log ?? []).filter(line => line.text === text).length, 1,
+    'the colleague logs the line once')
+  await alice.wg.stopRound(room.id)
+  await relay.catch(() => {})
+})
+
+// 7a-2. THE COLLEAGUE'S CONVERSATION MUST DRAW THE LINE, NOT ONLY ITS LOG.
+//
+// The user opens the group's own Session. A person's line that crossed the Hub was written into
+// this domain's log and nowhere else, so the colleague's screen could not show it. A matched Bot
+// answer has the same requirement, but must not also become a new opener: the caller's round is
+// already continuing that exact exchange.
+test('a line from a person on another machine is drawn in the conversation, not re-run', async (t) => {
+  const { bob, workgroupId } = await invitedPair(t)
+  const bobRoom = () => bob.wg.roomOfHubGroup(workgroupId)
+  const text = '同事那边画出来的一句'
+  await until(() => bobRoom() !== undefined, { label: 'Bob has the room' })
+  const shown = await bob.wg.receiveRemote({
+    workgroupId,
+    event: {
+      eventId: 'evt-person-display-probe',
+      seq: bobRoom().seq + 1,
+      type: 'chat.message',
+      sender: { userId: 'usr_alice_probe' },
+      payload: { text, senderName: 'Alice' },
+    },
+  })
+  assert.equal(shown, true, 'the line is accepted')
+  const drawn = (bob.rt.ctx.followups ?? []).filter(entry => entry.sessionId === bobRoom().id
+    && String(entry.message?.content?.[0]?.text ?? '').includes(text))
+  assert.equal(drawn.length, 1, 'the colleague draws the line in the conversation once')
+  assert.equal(drawn[0].message.source?.role, 'remote', 'and does not start a round for a person line')
+})
+
+// 7a-3. AN ORDINARY BOT POST WITH NO WAITER MUST STILL BE ABLE TO CALL THE NEXT MEMBER.
+//
+// The display-only role is only for a person line and for an answer that closes a live slot. A
+// Bot's spontaneous post in the group is the original member opener: its @Name must call the next
+// speaker, so it keeps the member flag and the post role.
+test('a remote Bot post with no matching slot stays an opener', async (t) => {
+  const { alice, workgroupId } = await invitedPair(t)
+  const room = alice.wg.roomOfHubGroup(workgroupId)
+  const remote = room.members.find(member => member.name === 'BobChief')
+  const before = (alice.rt.ctx.followups ?? []).length
+  const shown = await alice.wg.receiveRemote({
+    workgroupId,
+    event: {
+      eventId: 'evt_remote_opener_probe',
+      seq: room.seq + 1,
+      type: 'chat.message',
+      sender: { userId: 'usr_bob', botEndpointId: remote.endpointId },
+      payload: { text: '@Chief 麻烦看一下', senderName: remote.name, exchangeId: 'exchange-ordinary' },
+    },
+  })
+  assert.equal(shown, true, 'the line is accepted')
+  const drawn = (alice.rt.ctx.followups ?? []).slice(before).filter(entry => entry.sessionId === room.id
+    && String(entry.message?.content?.[0]?.text ?? '').includes('麻烦看一下'))
+  assert.equal(drawn.length, 1, 'the line is drawn once')
+  assert.equal(drawn[0].message.source?.role, 'post', 'an ordinary member post stays an opener')
+  assert.equal(drawn[0].message.source?.member, true, 'and is marked as a member speaking')
+})
+
 // 7b. A PLAIN MESSAGE FROM THE INVITEE GOES TO THE ADMIN, NOT TO THE INVITEE'S OWN BOT.
 //
 // This is the user's exact sentence: 「同事如果没有点名 @ 其他同事的 bot，跟原群聊一样由管理员接待」.

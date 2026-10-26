@@ -2,9 +2,9 @@
 # 进度台账与缺口登记
 
 - 日期：2026-10-22
-- 水位：**G5 完成**（方案 §14 的 5 条门禁有自动化证据；新增 N1/N2 通过；N3 与门禁 2 的真机一半待人工），未发版
+- 水位：**G6 原方案已被否决；G6R 自动化已完成，人工项仍 BLOCKED**。原版群记忆引擎（`groups/<roomId>/`、成员校验、回顾、面板、归档）是唯一实现，Hub 只传输 `memory.change`。G4-1/5/6、G4-T20、G5-T12/N3/T14、G6-M1 仍待人工，未发版
 - 2026-10-23 补：**群内 Bot 交接**（方案 §5.1 的 `host/handoffs.js` 复制件）此前缺失，现已补上；属 G1 复制缺口，非 G5 范围
-- 2026-10-25 补：**旧群 lead 回填 + 发布包漏文件** 已闭环，属 G4/G5 已交付范围的缺陷，**不新开阶段**；整体水位仍为 G5 自动部分完成，下一步 G6
+- 2026-10-25 补：**旧群 lead 回填 + 发布包漏文件** 已闭环，属 G4/G5 已交付范围的缺陷，**不新开阶段**；当时的下一步是 G6，G6 现见 `g6/ROUND-LOG.md`
 
 ## 进度台账
 
@@ -18,7 +18,9 @@
 | G5 跨用户委派与本人审批 | **自动部分通过（含补修轮）** | `g5/EVIDENCE-MATRIX.md`；hub 256 / ds-bot 1033 | 门禁 2 真机一半、N3 待人工 |
 | G4/G5 后补缺陷（lead 回填、发布包） | **已闭环（自动部分）** | `workgroup-membership.test.js` 18–22、`package-files.test.js`；ds-bot 1131 pass / 1 skip / 0 fail，hub 268 pass | app 安装副本重装与重启待维护者执行 |
 | G4/G5 修补轮（轮次持久化、对账、设置版本、任务幂等、Stop 持久、全量门禁） | **已闭环（自动部分）** | `docs/workgroup/gates.md` 的「G4/G5 修补轮」；人工项仍 BLOCKED | 不改阶段水位，不虚报人工结论 |
-| 人工验收 | 待执行 | `manual-checklist.md` | 由维护者执行 |
+| G6 群记忆（旧方案） | **已否决** | `g6/ROUND-LOG.md`（历史）；新建 `group_memories`、`memory-*` 端点与独立 UI，违反复制优先 | 保留为反例，不 merge |
+| G6R 群记忆跨机传输 | **自动化通过；人工 BLOCKED** | `g6r/EVIDENCE-MATRIX.md`、`g6r/ROUND-LOG.md` | 复用原版引擎；G6-M1 待两台真机 |
+| 人工验收 | 待执行 | `manual-checklist.md` | 由维护者执行；G6-M1 已加入 |
 | 发版 | 未执行 | `ds-bot` 源码 0.2.3；未发版 | 需求明确不发版 |
 
 ## G4 做到什么
@@ -238,7 +240,7 @@ B 机回答 → postInRound → mirrorLine → Hub → A 机 receiveRemote → �
 **1. 消息不实时更新（两个独立原因，都在显示侧）**
 
 - 面板读一次就再也不读：`openWorkgroup` 调 `callWorkgroup('room')` 后就没人再读，Hub 的新行写进了
-  `state.json`，屏幕上没有。修法：新增 `useLiveRoom(roomId)`，在 `ChatPane` 挂载期间每 1.2 s 重读一次，
+  `state.json`，屏幕上没有。修法：新增 `useLiveRoom(roomId)`，由既有的 `/api/bot/feed` push 触发重读，保留 5 s 兜底轮询（历史实现曾每 1.2 s 轮询）。
   **只在 `roomSignature` 真的变了才写 store**（否则每 tick 重建一次 transcript），离开群即停。
 - 别家 Bot 的发言从不进群 Session：`receiveRemote` 有一条正确规则「Hub 来的行不写群 Session」，因为它
   会触发第二次回合。但这条规则同时把同事 Bot 的话挡在了用户阅读的那个聊天面之外。修法：按**角色**拆开而不
@@ -470,7 +472,7 @@ ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
 | 8 | 手机号未经验证，只是登录名 | 认证方式定为手机号 + 密码，无短信 | 源仓库已决定 | 长期 |
 | 9 | **门禁 1（两台真机）与门禁 6（观感对照）无自动化证据** | 只能人工判定 | 维护者 | 交付前 |
 | 10 | ~~附件只到「聊天附件」~~ **已做**：`artifacts` 表 + `/v1/artifacts/uploads`、`/v1/artifacts/:id/download`、`/v1/tasks/:id/artifacts` | G5 完成；与 G4 的 `attachments` 并存不合并 | 已定 | 已关闭 |
-| 11 | ~~跨用户 Bot 委派/审批、`round_leases`~~ **已做**（G5）；**群记忆跨用户检索（G6）仍未做** | 委派与审批在 G5 完成 | 已定 | G6 |
+| 11 | ~~跨用户 Bot 委派/审批、`round_leases`~~ **已做**（G5）；**群记忆跨机传输自动化已做**：原版引擎 + `memory.change`，人工项 G6-M1 仍 BLOCKED | 原版有引擎、无传输 | 已定 | G6R |
 | 12 | ~~`workgroup_deliverRemote` 的 Bot 侧执行未接~~ **已做**：`task.request` 到达后由 B 本机 `task-runner.js` 承接，经 B 本人的审批 | G5 门禁 1/2 的核心 | 已定 | 已关闭 |
 | 13 | 面板的成员列表在 Hub 离线时为空（不缓存） | 避免把过期名单当成事实；离线仍可看日志 | 本轮决定 | 需要时加缓存 |
 | 14 | 附件选择用浏览器 `FileReader`，只在客户端可用；宿主侧无独立上传入口 | 与 G3 一样，文件由 UI 提供 | 本轮决定 | 需要 CLI 上传时 |
@@ -482,7 +484,7 @@ ALTER TABLE workgroups ADD COLUMN lead_membership_id TEXT
 | 23 | 群内「谁正在看」未画（Hub 名册有 `online`，UI 未用） | 微信式群聊会显示，但需要一条成员级订阅而非每次拉名册 | 待定 | 第 5 项跟进时 |
 | 24 | 动效只在「本机在跑」时可见；别的机器上的成员干活，本机看不到 | `roomWorkView` 是**本进程**的 `live` 表，跨机活动态要新的事件类型（`presence.working`） | 待定 | 第 6 项跟进时 |
 | 25 | ~~管理员每台机器自己算~~ **已解决（v7）**：`workgroups.lead_membership_id`，由群主机器建群或改设置时指定；**老群由群主机器在 `syncRoster` 幂等回填**，各机器读同一个答案 | — | — | 已闭环（含老群回填） |
-| 26 | **成员列表每 1.2 s 一次 HTTP 轮询**，不是推送 | 客户端与宿主之间只有一条 POST 路由（`api.js`），原版团队自己的 roster 也是 1.5 s 轮询；加流式要新传输通道 | 本轮决定 | 轮询成为瓶颈时（大群、多标签页） |
+| 26 | 成员列表由 feed push 触发重读，5 s 兜底轮询 | 复用既有 `/api/bot/feed`；不新造浏览器传输 | G4 后续实现 | 若兜底轮询成为瓶颈再评估 |
 | 27 | **app 安装副本仍缺 `src/client/`**：源码与发布清单已修，但 `app/node_modules/ds-bot` 未重装，正在跑的应用仍会工作群域加载失败→登录 404 | 用户选择本轮不动 app 依赖、不重启 | 用户，2026-10-25 | 下次启动应用前，在 `app/` 重装并重启 |
 
 ## 第 4 轮自查修复（2026-10-22）

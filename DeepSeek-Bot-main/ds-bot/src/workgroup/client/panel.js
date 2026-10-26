@@ -87,7 +87,7 @@ export async function openWorkgroup(id) {
 const FEED_PATH = 'api/bot/feed'
 const liveListeners = new Set()
 let liveSource
-const listenLive = (fn) => {
+export const listenLive = (fn) => {
   liveListeners.add(fn)
   if (liveSource === undefined && typeof EventSource === 'function') {
     liveSource = new EventSource(FEED_PATH)

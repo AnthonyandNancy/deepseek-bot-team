@@ -72,6 +72,9 @@ const DENIED = 'memory/denied'
 // What a review shows of memory, in characters of entry text.
 const REVIEW_MEMORY_MAX = 16_000
 const NEWS_TEXT_MAX = 160
+// How many remote memory event ids the receiver remembers for idempotency. A replay after this many
+// intervening events can only come from a Hub that kept an event far past its ordinary replay window.
+const APPLIED_MEMORY_MAX = 500
 
 // ---------------------------------------------------------------------------
 // Entries and files, as text.
@@ -465,7 +468,7 @@ export function install(rt) {
   const scopeKey = scope => (scope.kind === 'team' ? 'team' : scope.kind === 'group' ? `group:${scope.roomId}` : `bot:${scope.botId}`)
   // The group a Session speaks in, an earlier part of it included: none for a Bot's
   // own chat. Writes check membership again, so a member that has left writes nothing.
-  const roomIdOf = sessionId => rt.groupOwners.get(sessionId)?.roomId ?? rt.pastOwners.get(sessionId)?.roomId
+  const roomIdOf = sessionId => rt.groupOwners.get(sessionId)?.roomId ?? rt.pastOwners.get(sessionId)?.roomId ?? rt.memoryRoomOf?.(sessionId)
   // A room by id, whichever domain owns it. The original index answers for a local group;
   // a workgroup is answered by its own domain through the one read-only seam, so the
   // memory panel, its write checks and its keeper checks work on both kinds of group.
@@ -509,6 +512,20 @@ export function install(rt) {
   async function journal(record) {
     await mkdir(root, { recursive: true })
     await appendFile(journalPath, `${JSON.stringify({ time: new Date().toISOString(), ...record })}\n`, 'utf8')
+  }
+  // Observation only: the original write has already succeeded when this runs. A transport adapter
+  // may copy the change to another machine, but a failure there must never turn a saved entry into
+  // an error (the file, journal and review cursor are the engine's, not the adapter's).
+  let applyingRemote = false
+  function reportWrite(change) {
+    // A change this machine received is already on the other machine. Sending it back would make two
+    // machines echo one entry forever (and a Hub ack would re-apply it here).
+    if (applyingRemote) return
+    try {
+      rt.onMemoryWritten?.(change)
+    } catch (error) {
+      rt.warn('ds-bot: memory observer failed: %s', error?.message ?? error)
+    }
   }
   let writing = Promise.resolve()
   const queued = (job) => {
@@ -599,35 +616,38 @@ export function install(rt) {
     news.set(id, { at: Date.now(), op, text: splitMeta(String(line ?? '').replace(/^- /, '')).text.slice(0, NEWS_TEXT_MAX) })
   }
 
-  function addEntry({ scope, topic, text, meta, actor, label }) {
-    return queued(async () => {
-      writable(scope, actor)
-      const files = loadScope(scope)
-      const [same] = matchEntries(allEntries(files), text).filter(entry => squash(entry.text) === squash(text))
-      if (same !== undefined) return { changed: false, file: same.file, message: `Already in ${label} (${fileName(same.file)}): "${same.text}". Nothing changed.` }
-      const main = files[0]
-      let target = topic === undefined ? main : files.find(file => file.topic === topic)
-      const fresh = target === undefined
-      if (fresh) {
-        if (files.length - 1 >= MEMORY_LIMITS.topics) throw new Error(`${capital(label)} already has ${MEMORY_LIMITS.topics} topics, the most it holds. Add to one of them (recall lists them), or forget one.`)
-        target = { topic, file: `${topic}.md`, path: join(dirOf(scope), `${topic}.md`), content: '', ...parseMemory(`# ${topic}\n`) }
-      }
-      const base = target.lines.length > 0 ? target.lines : parseMemory(target === main ? EMPTY_MAIN : `# ${topic}\n`).lines
-      const line = formatEntry(text, meta)
-      const next = joinLines(insertEntry(base, line))
-      checkSize(target, next, label)
-      let index
-      if (topic !== undefined && !main.links.includes(topic)) {
-        index = joinLines(addLink(main.lines.length > 0 ? main.lines : parseMemory(EMPTY_MAIN).lines, topic))
-        checkSize(main, index, label)
-      }
-      await writeText(target.path, next)
-      if (index !== undefined) await writeText(main.path, index)
-      await journal({ op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line })
-      noteNews(scope, actor, 'add', line)
-      const where = topic === undefined ? MAIN : fresh ? `the new topic [[${topic}]], linked from MEMORY.md` : `topic [[${topic}]]`
-      return { changed: true, file: target, message: `Saved to ${label}, in ${where} (${sizeNote(target, next.length)}).` }
-    })
+  async function addEntryInner({ scope, topic, text, meta, actor, label }) {
+    writable(scope, actor)
+    const files = loadScope(scope)
+    const [same] = matchEntries(allEntries(files), text).filter(entry => squash(entry.text) === squash(text))
+    if (same !== undefined) return { changed: false, file: same.file, message: `Already in ${label} (${fileName(same.file)}): "${same.text}". Nothing changed.` }
+    const main = files[0]
+    let target = topic === undefined ? main : files.find(file => file.topic === topic)
+    const fresh = target === undefined
+    if (fresh) {
+      if (files.length - 1 >= MEMORY_LIMITS.topics) throw new Error(`${capital(label)} already has ${MEMORY_LIMITS.topics} topics, the most it holds. Add to one of them (recall lists them), or forget one.`)
+      target = { topic, file: `${topic}.md`, path: join(dirOf(scope), `${topic}.md`), content: '', ...parseMemory(`# ${topic}\n`) }
+    }
+    const base = target.lines.length > 0 ? target.lines : parseMemory(target === main ? EMPTY_MAIN : `# ${topic}\n`).lines
+    const line = formatEntry(text, meta)
+    const next = joinLines(insertEntry(base, line))
+    checkSize(target, next, label)
+    let index
+    if (topic !== undefined && !main.links.includes(topic)) {
+      index = joinLines(addLink(main.lines.length > 0 ? main.lines : parseMemory(EMPTY_MAIN).lines, topic))
+      checkSize(main, index, label)
+    }
+    await writeText(target.path, next)
+    if (index !== undefined) await writeText(main.path, index)
+    await journal({ op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line })
+    reportWrite({ scope, file: target, op: 'add', before: undefined, after: line, actor })
+    noteNews(scope, actor, 'add', line)
+    const where = topic === undefined ? MAIN : fresh ? `the new topic [[${topic}]], linked from MEMORY.md` : `topic [[${topic}]]`
+    return { changed: true, file: target, message: `Saved to ${label}, in ${where} (${sizeNote(target, next.length)}).` }
+  }
+
+  function addEntry(args) {
+    return queued(() => addEntryInner(args))
   }
 
   // `topic` narrows where to look; undefined looks in every file of the scope.
@@ -643,42 +663,137 @@ export function install(rt) {
   }
 
   // The entry keeps its place; `topic` only narrows where to look.
-  function replaceEntry({ scope, topic, match, text, meta, actor, label }) {
-    return queued(async () => {
-      writable(scope, actor)
-      const old = findOne(loadScope(scope), topic, match, label)
-      const line = formatEntry(text, meta)
-      const lines = [...old.file.lines]
-      const before = lines[old.line]
-      lines[old.line] = line
-      const next = joinLines(lines)
-      checkSize(old.file, next, label)
-      await writeText(old.file.path, next)
-      await journal({ op: 'replace', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, after: line })
-      noteNews(scope, actor, 'replace', line)
-      return { changed: true, file: old.file, message: `Updated in ${label} (${fileName(old.file)}): "${old.text}" is now "${text}".` }
-    })
+  async function replaceEntryInner({ scope, topic, match, text, meta, actor, label }) {
+    writable(scope, actor)
+    const old = findOne(loadScope(scope), topic, match, label)
+    const line = formatEntry(text, meta)
+    const lines = [...old.file.lines]
+    const before = lines[old.line]
+    lines[old.line] = line
+    const next = joinLines(lines)
+    checkSize(old.file, next, label)
+    await writeText(old.file.path, next)
+    await journal({ op: 'replace', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, after: line })
+    reportWrite({ scope, file: old.file, op: 'replace', before, after: line, actor })
+    noteNews(scope, actor, 'replace', line)
+    return { changed: true, file: old.file, message: `Updated in ${label} (${fileName(old.file)}): "${old.text}" is now "${text}".` }
   }
 
-  function removeEntry({ scope, topic, match, actor, label }) {
-    return queued(async () => {
-      writable(scope, actor)
-      const files = loadScope(scope)
-      const old = findOne(files, topic, match, label)
-      const before = old.file.lines[old.line]
-      const lines = old.file.lines.filter((_line, index) => index !== old.line)
-      // A topic left with nothing but its title goes, and so does its link.
-      const empty = old.file.topic !== undefined && lines.every(line => line.trim() === '' || HEADING.test(line))
-      if (empty) {
-        await unlink(old.file.path).catch(error => { if (error?.code !== 'ENOENT') throw error })
-        const main = files[0]
-        if (main.links.includes(old.file.topic)) await writeText(main.path, joinLines(removeLink(main.lines, old.file.topic)))
-      } else {
-        await writeText(old.file.path, joinLines(lines))
+  function replaceEntry(args) {
+    return queued(() => replaceEntryInner(args))
+  }
+
+  async function removeEntryInner({ scope, topic, match, actor, label }) {
+    writable(scope, actor)
+    const files = loadScope(scope)
+    const old = findOne(files, topic, match, label)
+    const before = old.file.lines[old.line]
+    const lines = old.file.lines.filter((_line, index) => index !== old.line)
+    // A topic left with nothing but its title goes, and so does its link.
+    const empty = old.file.topic !== undefined && lines.every(line => line.trim() === '' || HEADING.test(line))
+    if (empty) {
+      await unlink(old.file.path).catch(error => { if (error?.code !== 'ENOENT') throw error })
+      const main = files[0]
+      if (main.links.includes(old.file.topic)) await writeText(main.path, joinLines(removeLink(main.lines, old.file.topic)))
+    } else {
+      await writeText(old.file.path, joinLines(lines))
+    }
+    await journal({ op: 'remove', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, ...(empty ? { removedTopic: true } : {}) })
+    reportWrite({ scope, file: old.file, op: 'remove', before, after: undefined, actor })
+    noteNews(scope, actor, 'remove', before)
+    return { changed: true, file: old.file, message: `Removed from ${label} (${fileName(old.file)}): "${old.text}", all of it, so save again with remember any part that is still true. The change log keeps a copy.${empty ? ` The topic [[${old.file.topic}]] was empty, so it is gone too.` : ''}` }
+  }
+
+  function removeEntry(args) {
+    return queued(() => removeEntryInner(args))
+  }
+
+  // ── a change made on another machine ─────────────────────────────────────────
+  // The original engine is still the only writer: this runs on the same queue, checks the same
+  // `writable()`, reads the files again, journals the same record and invalidates the same snapshots.
+  // The only new state is the bounded set of Hub event ids already applied, which makes a redelivery
+  // (the Hub replays until acked) a no-op instead of a second entry.
+  const appliedPath = join(root, 'applied.json')
+  /** @type {string[] | undefined} */
+  let appliedIds
+  const appliedNow = () => {
+    if (appliedIds === undefined) {
+      try {
+        const value = JSON.parse(readFileSync(appliedPath, 'utf8'))
+        appliedIds = Array.isArray(value) ? value.filter(id => typeof id === 'string') : []
+      } catch {
+        appliedIds = []
       }
-      await journal({ op: 'remove', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, ...(empty ? { removedTopic: true } : {}) })
-      noteNews(scope, actor, 'remove', before)
-      return { changed: true, file: old.file, message: `Removed from ${label} (${fileName(old.file)}): "${old.text}", all of it, so save again with remember any part that is still true. The change log keeps a copy.${empty ? ` The topic [[${old.file.topic}]] was empty, so it is gone too.` : ''}` }
+    }
+    return appliedIds
+  }
+
+  async function applyRemoteMemoryChange({ eventId, roomId, op, topic, before, after, actor }) {
+    if (typeof eventId !== 'string' || eventId === '') return { changed: false, reason: 'invalid' }
+    if (!['add', 'replace', 'remove'].includes(op)) return { changed: false, reason: 'invalid' }
+    if (typeof roomId !== 'string' || roomId === '') return { changed: false, reason: 'invalid' }
+    const scope = groupScope(roomId)
+    // The caller resolved the Hub sender to a member of THIS machine's room. That member may be a
+    // REMOTE Bot, whose id is an endpoint id here and has no local Bot record; passing it to the
+    // original `writable()` would (correctly) say "that Bot was deleted", because that check is
+    // about a local Bot writing from its own Session. This entry is, on this machine, a user-authorized
+    // write to a group the user is still in — the same path the memory panel uses. The membership was
+    // checked above by the caller, and the original group check below still refuses a deleted room.
+    const remoteName = actor !== null && typeof actor === 'object' && typeof actor.name === 'string' && actor.name !== '' ? actor.name : undefined
+    const changeActor = remoteName === undefined ? USER : { id: 'user', name: remoteName }
+    const label = labelOf(scope, 'user')
+    const applyInner = async () => {
+      const topicName = typeof topic === 'string' && topic !== '' ? topic : undefined
+      // `before` is the full line the sender's journal recorded, including its metadata. The local
+      // copy has different metadata (its own source and date), so match on the entry text; that is
+      // the same rule `forget` and `remember replace` use for a human's line.
+      const beforeText = typeof before === 'string' ? splitMeta(before.replace(/^- /, '')).text : ''
+      let result
+      if (op === 'add') {
+        const parsed = splitMeta(String(after ?? '').replace(/^- /, ''))
+        if (parsed.text === '') return { changed: false, reason: 'invalid' }
+        result = await addEntryInner({ scope, topic: topicName, text: parsed.text, meta: parsed.meta, actor: changeActor, label })
+      } else if (op === 'replace') {
+        const parsed = splitMeta(String(after ?? '').replace(/^- /, ''))
+        if (beforeText === '' || parsed.text === '') return { changed: false, reason: 'invalid' }
+        result = await replaceEntryInner({ scope, topic: topicName, match: beforeText, text: parsed.text, meta: parsed.meta, actor: changeActor, label })
+      } else {
+        if (beforeText === '') return { changed: false, reason: 'invalid' }
+        result = await removeEntryInner({ scope, topic: topicName, match: beforeText, actor: changeActor, label })
+      }
+      appliedNow().push(eventId)
+      if (appliedNow().length > APPLIED_MEMORY_MAX) appliedNow().splice(0, appliedNow().length - APPLIED_MEMORY_MAX)
+      await writeText(appliedPath, JSON.stringify(appliedNow()))
+      // A remote change must reach a Session's next prompt, exactly as a local write does.
+      for (const sessionId of Object.values(roomOf(roomId)?.sessions ?? {})) renewMemory(sessionId)
+      return { changed: result.changed === true, result }
+    }
+    return queued(async () => {
+      await rt.load()
+      if (appliedNow().includes(eventId)) return { changed: false, reason: 'duplicate' }
+      // The writer is a member of the group on the Hub, resolved by the adapter to a member of this
+      // machine's room. A room that has been deleted here is still refused by the original check.
+      if (roomOf(roomId) === undefined) return { changed: false, reason: 'gone' }
+      if (actor !== null && typeof actor === 'object' && typeof actor.id === 'string'
+        && !(roomOf(roomId)?.members ?? []).map(entry => (entry !== null && typeof entry === 'object' ? entry.id : entry)).includes(actor.id)) {
+        return { changed: false, reason: 'not-member' }
+      }
+      try {
+        writable(scope, changeActor)
+      } catch (error) {
+        if (error?.code === DENIED) return { changed: false, reason: 'not-member' }
+        if (error?.code === GONE) return { changed: false, reason: 'gone' }
+        throw error
+      }
+      applyingRemote = true
+      try {
+        return await applyInner()
+      } finally {
+        applyingRemote = false
+      }
+    }).catch((error) => {
+      if (error?.code === NO_MATCH) return { changed: false, reason: 'not-found' }
+      throw error
     })
   }
 
@@ -1473,7 +1588,7 @@ export function install(rt) {
     // A turn that starts again before the delay is over is reviewed when it ends.
     ctx.on('agent/status', ({ agent, status }) => {
       const id = agent?.id
-      if (id === undefined || (!rt.isBotSession(id) && !turnOwners.has(id))) return
+      if (id === undefined || (!rt.isBotSession(id) && !rt.memoryRoomOf?.(id) && !turnOwners.has(id))) return
       clearTimeout(reviewTimers.get(id))
       reviewTimers.delete(id)
       if (status !== 'idle') {
@@ -1506,7 +1621,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    memoryEnabled: true, renewMemory, archiveBotMemory, archiveGroupMemory, memoryEndpoint, memoryReviews,
+    memoryEnabled: true, renewMemory, archiveBotMemory, archiveGroupMemory, memoryEndpoint, memoryReviews, applyRemoteMemoryChange,
     memoryNews: () => Object.fromEntries(news),
   })
 }

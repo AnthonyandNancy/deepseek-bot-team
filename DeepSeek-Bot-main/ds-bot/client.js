@@ -7877,6 +7877,15 @@ function TeamSidebar(props) {
   (0, import_react15.useEffect)(() => {
     void refreshWorkgroups();
   }, [workgroups.length]);
+  const hasWorkgroups = workgroups.length > 0;
+  (0, import_react15.useEffect)(() => {
+    if (!hasWorkgroups) return void 0;
+    return listenLive((payload) => {
+      if (payload?.kind === "settings" || payload?.kind === "roster" || payload?.kind === "message") {
+        void refreshWorkgroups();
+      }
+    });
+  }, [hasWorkgroups]);
   const order = (0, import_react15.useMemo)(() => {
     const stamps = JSON.parse(updated);
     const entries2 = [

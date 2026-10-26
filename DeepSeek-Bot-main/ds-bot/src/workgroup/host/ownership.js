@@ -181,6 +181,18 @@ export function install(wg) {
   }
   wg.sessionGroupScope = sessionGroupScope
 
+  // The group a MEMBER Session speaks in, for the original memory module's review. It is a
+  // different question from `sessionGroupScope` above: memory needs the room id, not a tool-facing
+  // scope object, and must not see the group's own relay Session (which has no member botId).
+  // Deliberately read-only, and deliberately NOT a change to `rt.isBotSession`: the original turn
+  // machinery filters on that predicate, and answering "yes" here would make it manage a foreign
+  // Session.
+  function memoryRoomOf(sessionId) {
+    const owner = sessionId === undefined ? undefined : sessionOwners.get(sessionId)
+    return owner === undefined || owner.botId === undefined ? undefined : owner.workgroupId
+  }
+  wg.memoryRoomOf = memoryRoomOf
+
   // The BOT a Session speaks for, in either domain, as one lookup: the original index
   // first, then this domain's own ownership record.
   //
@@ -255,6 +267,7 @@ export function install(wg) {
     resolveSessionOwnerStrict,
     workgroupOwnsSession: wg.ownsSession,
     sessionGroupScope,
+    memoryRoomOf,
     selfOf,
     groupSessionsOf,
     workDirOf,

@@ -11,7 +11,7 @@ import { Shimmer, workPhrase } from './cells.js'
 import { springEasing, SPRING_SHAPE } from './motion.js'
 import { hostText, t } from './i18n.js'
 import { WorkgroupRow } from '../workgroup/client/rows.js'
-import { refreshWorkgroups } from '../workgroup/client/panel.js'
+import { refreshWorkgroups, listenLive } from '../workgroup/client/panel.js'
 import { InviteInbox, InviteInboxButton, useInbox } from '../workgroup/client/inbox.js'
 import { showsDshRow } from './dsh-offer.js'
 
@@ -284,6 +284,18 @@ export function TeamSidebar(props) {
   // The rows come from the workgroup store, so the list is pulled once on mount and again
   // whenever the number of workgroups changes (a create, a delete, an upgrade).
   useEffect(() => { void refreshWorkgroups() }, [workgroups.length])
+  // A change made on another machine arrives on the host's existing workgroup feed. Re-reading
+  // the list projection is all this surface needs: the store subscription in `src/client/index.js`
+  // rebuilds `roster.roomsById`, which the open conversation and settings drawer already read.
+  const hasWorkgroups = workgroups.length > 0
+  useEffect(() => {
+    if (!hasWorkgroups) return undefined
+    return listenLive((payload) => {
+      if (payload?.kind === 'settings' || payload?.kind === 'roster' || payload?.kind === 'message') {
+        void refreshWorkgroups()
+      }
+    })
+  }, [hasWorkgroups])
   const order = useMemo(() => {
     const stamps = JSON.parse(updated)
     const entries = [
